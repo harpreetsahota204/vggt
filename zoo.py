@@ -89,7 +89,6 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
             self.dtype = torch.bfloat16 if capability[0] >= 8 else torch.float16
         else:
             self.dtype = torch.float32
-        
         self._fields = {}
 
         @property
@@ -100,6 +99,7 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
         @needs_fields.setter
         def needs_fields(self, fields):
             self._fields = fields
+
     def _load_model(self, config):
         """Load the pre-downloaded VGGT model from disk.
         
@@ -124,6 +124,7 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
         # Load the complete model (architecture + weights) from disk
         # weights_only=False allows loading the full model object
         model = torch.load(config.model_path, map_location='cpu', weights_only=False)
+        model = model.to(self._device)
 
         return model
 
