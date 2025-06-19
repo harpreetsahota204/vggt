@@ -1,0 +1,29 @@
+{
+    "name": "VGGT",
+    "url": "https://github.com/harpreetsahota204/vggt",
+    "models": [
+        {
+            "base_name": "meta_ai/vggt",
+            "base_filename":"VGGT",
+            "author": "Meta AI",
+            "license": "CC BY-NC 4.0",
+            "source": "huggingface.co/facebook/vggt-1b",
+            "description": "Visual Geometry Grounded Transformer (VGGT) is a feed-forward neural network that directly infers all key 3D attributes of a scene.",
+            "tags": [
+                "depth",
+                "threed",
+                "keypoints"
+            ],
+            "date_added": "2025-06-19",
+            "requirements": {
+                "packages": ["git+https://github.com/facebookresearch/vggt.git#egg=vggt", "torch", "torchvision", "open3d"],
+                "cpu": {
+                    "support": true
+                },
+                "gpu": {
+                    "support": true
+                }
+            }
+        }
+    ]
+}
