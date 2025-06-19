@@ -184,15 +184,33 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
                 with torch.no_grad():
                     with torch.amp.autocast('cuda', dtype=self.dtype):
                         # Get aggregated features for tracking
-                        aggregated_tokens_list, ps_idx = self._model.aggregator(img_batch)
+                        print("DEBUG: Getting aggregated features...")
+                        aggregation_result = self._model.aggregator(img_batch)
+                        print(f"DEBUG: Aggregator returned {len(aggregation_result)} values")
+                        
+                        if len(aggregation_result) == 2:
+                            aggregated_tokens_list, ps_idx = aggregation_result
+                        else:
+                            print(f"DEBUG: Unexpected aggregator output: {len(aggregation_result)} values")
+                            raise ValueError(f"aggregator returned {len(aggregation_result)} values, expected 2")
                         
                         # Run full VGGT model prediction
+                        print("DEBUG: Running full model prediction...")
                         vggt_predictions = self._model(img_batch)
+                        print(f"DEBUG: Model prediction keys: {vggt_predictions.keys()}")
                         
                         # Convert VGGT's pose encoding to standard camera matrices
-                        extrinsic, intrinsic = pose_encoding_to_extri_intri(
+                        print("DEBUG: Converting pose encoding...")
+                        pose_result = pose_encoding_to_extri_intri(
                             vggt_predictions["pose_enc"], img_batch.shape[-2:]
                         )
+                        print(f"DEBUG: pose_encoding_to_extri_intri returned {len(pose_result)} values")
+                        
+                        if len(pose_result) == 2:
+                            extrinsic, intrinsic = pose_result
+                        else:
+                            print(f"DEBUG: Unexpected pose encoding output: {len(pose_result)} values")
+                            raise ValueError(f"pose_encoding_to_extri_intri returned {len(pose_result)} values, expected 2")
                 
                 # Generate query points for 3D tracking in original image coordinates
                 query_points_original = self._generate_query_points(
@@ -390,11 +408,30 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
         # Run VGGT's tracking pipeline using pre-computed features
         with torch.no_grad():
             with torch.amp.autocast('cuda', dtype=self.dtype):
-                # Use pre-computed aggregated features for tracking
-                track_list, vis_score, conf_score = self._model.track_head(
+                # Debug: Check what track_head actually returns
+                print("DEBUG: Calling track_head...")
+                tracking_output = self._model.track_head(
                     aggregated_tokens_list, images, ps_idx, 
                     query_points=query_points_tensor
                 )
+                
+                # Print debug information
+                print(f"DEBUG: track_head returned {len(tracking_output)} values")
+                print(f"DEBUG: Types: {[type(x) for x in tracking_output]}")
+                
+                # Handle different return value counts
+                if len(tracking_output) == 3:
+                    track_list, vis_score, conf_score = tracking_output
+                    print("DEBUG: Successfully unpacked 3 values from track_head")
+                elif len(tracking_output) == 4:
+                    track_list, vis_score, conf_score, extra = tracking_output
+                    print(f"DEBUG: Got 4 values, extra type: {type(extra)}")
+                elif len(tracking_output) == 5:
+                    track_list, vis_score, conf_score, extra1, extra2 = tracking_output
+                    print(f"DEBUG: Got 5 values, extra types: {type(extra1)}, {type(extra2)}")
+                else:
+                    raise ValueError(f"Unexpected number of return values from track_head: {len(tracking_output)}")
+        
         
         def _convert_to_list(data):
             """Convert various tensor formats to Python lists for serialization."""
