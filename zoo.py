@@ -87,7 +87,7 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
             self.dtype = torch.bfloat16 if capability[0] >= 8 else torch.float16
         else:
             self.dtype = torch.float32
-            
+
         @property
         def needs_fields(self):
             """A dict mapping model-specific keys to sample field names."""
@@ -226,48 +226,48 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
         
         return predictions
 
-def _preprocess_vggt_image(self, img):
-    """Preprocess PIL image for VGGT model using VGGT's preprocessing logic."""
-    # Ensure we have a PIL Image, not a tensor
-    if isinstance(img, torch.Tensor):
-        raise TypeError("Expected PIL Image, got torch.Tensor. Make sure the input to _preprocess_vggt_image is a PIL Image.")
-    
-    # Store original size
-    original_size = img.size  # (width, height)
-    
-    target_size = 518
-    
-    # Handle RGBA images by blending onto white background
-    if img.mode == "RGBA":
-        img = Image.alpha_composite(
-            img.convert("RGBA"), 
-            Image.new("RGBA", img.size, (255, 255, 255, 255))
-        ).convert("RGB")
-    elif img.mode != "RGB":
-        # Convert to RGB if not already
-        img = img.convert("RGB")
-    
-    width, height = img.size
-    
-    # Set width to 518px
-    new_width = target_size
-    # Calculate height maintaining aspect ratio, divisible by 14
-    new_height = round(height * (new_width / width) / 14) * 14
-    
-    # Resize with new dimensions
-    img = img.resize((new_width, new_height), Image.Resampling.BICUBIC)
-    img_tensor = TF.to_tensor(img)  # Convert to tensor (0, 1), shape [C, H, W]
-    
-    # Center crop height if it's larger than 518
-    if new_height > target_size:
-        start_y = (new_height - target_size) // 2
-        img_tensor = img_tensor[:, start_y : start_y + target_size, :]
-    
-    # Move to device
-    img_tensor = img_tensor.to(self._device)
-    
-    logger.debug(f"Preprocessed image shape: {img_tensor.shape}, original size: {original_size}")
-    return img_tensor, original_size
+    def _preprocess_vggt_image(self, img):
+        """Preprocess PIL image for VGGT model using VGGT's preprocessing logic."""
+        # Ensure we have a PIL Image, not a tensor
+        if isinstance(img, torch.Tensor):
+            raise TypeError("Expected PIL Image, got torch.Tensor. Make sure the input to _preprocess_vggt_image is a PIL Image.")
+        
+        # Store original size
+        original_size = img.size  # (width, height)
+        
+        target_size = 518
+        
+        # Handle RGBA images by blending onto white background
+        if img.mode == "RGBA":
+            img = Image.alpha_composite(
+                img.convert("RGBA"), 
+                Image.new("RGBA", img.size, (255, 255, 255, 255))
+            ).convert("RGB")
+        elif img.mode != "RGB":
+            # Convert to RGB if not already
+            img = img.convert("RGB")
+        
+        width, height = img.size
+        
+        # Set width to 518px
+        new_width = target_size
+        # Calculate height maintaining aspect ratio, divisible by 14
+        new_height = round(height * (new_width / width) / 14) * 14
+        
+        # Resize with new dimensions
+        img = img.resize((new_width, new_height), Image.Resampling.BICUBIC)
+        img_tensor = TF.to_tensor(img)  # Convert to tensor (0, 1), shape [C, H, W]
+        
+        # Center crop height if it's larger than 518
+        if new_height > target_size:
+            start_y = (new_height - target_size) // 2
+            img_tensor = img_tensor[:, start_y : start_y + target_size, :]
+        
+        # Move to device
+        img_tensor = img_tensor.to(self._device)
+        
+        logger.debug(f"Preprocessed image shape: {img_tensor.shape}, original size: {original_size}")
+        return img_tensor, original_size
 
     def _generate_query_points(self, height: int, width: int, num_points: int) -> List[Tuple[float, float]]:
         """Generate a grid of query points for 3D tracking in original image coordinates.
