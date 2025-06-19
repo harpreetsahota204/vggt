@@ -52,9 +52,7 @@ class VGGTModel(fout.TorchImageModel):
     """
 
     def __init__(self, config):
-        if not VGGT_AVAILABLE:
-            raise ImportError("VGGT is not installed. Please install it first.")
-            
+
         super().__init__(config)
         
         # Load the VGGT model
