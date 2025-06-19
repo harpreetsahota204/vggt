@@ -3,7 +3,7 @@
     "url": "https://github.com/harpreetsahota204/vggt",
     "models": [
         {
-            "base_name": "meta_ai/vggt",
+            "base_name": "facebook/VGGT-1B",
             "base_filename":"VGGT",
             "author": "Meta AI",
             "license": "CC BY-NC 4.0",
