@@ -39,10 +39,10 @@ class VGGTModelConfig(fout.TorchImageModelConfig):
             The model should be saved as a complete PyTorch model using torch.save().
         confidence_threshold (float): Percentile threshold (0-100) for filtering
             point cloud points based on depth confidence. Higher values result in
-            fewer but more reliable points. Default is 25.0.
+            fewer but more reliable points. Default is 51.0.
         num_query_points (int): Number of 2D points to automatically generate
             for 3D tracking. These points are distributed in a grid pattern
-            across the image. Default is 50.
+            across the image. Default is 1551.
     """
 
     def __init__(self, d):
@@ -89,6 +89,8 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
             self.dtype = torch.bfloat16 if capability[0] >= 8 else torch.float16
         else:
             self.dtype = torch.float32
+        
+        # Initialize fields dict for SamplesMixin
         self._fields = {}
 
     @property
@@ -125,6 +127,7 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
         # weights_only=False allows loading the full model object
         model = torch.load(config.model_path, map_location='cpu', weights_only=False)
         model = model.to(self._device)
+        model.eval()
 
         return model
 
@@ -180,7 +183,10 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
                 # Run VGGT inference with automatic mixed precision
                 with torch.no_grad():
                     with torch.amp.autocast('cuda', dtype=self.dtype):
-                        # Forward pass through VGGT model
+                        # Get aggregated features for tracking
+                        aggregated_tokens_list, ps_idx = self._model.aggregator(img_batch)
+                        
+                        # Run full VGGT model prediction
                         vggt_predictions = self._model(img_batch)
                         
                         # Convert VGGT's pose encoding to standard camera matrices
@@ -195,7 +201,7 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
                 
                 # Perform 3D point tracking with coordinate space conversion
                 track_data = self._get_point_tracks(
-                    img_batch, query_points_original, original_size, vggt_size
+                    aggregated_tokens_list, ps_idx, img_batch, query_points_original, original_size, vggt_size
                 )
                 
                 # Package all VGGT outputs for file saving and processing
@@ -328,7 +334,8 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
         # Return exact number of requested points
         return query_points[:num_points]
 
-    def _get_point_tracks(self, images: torch.Tensor, query_points_original: List[Tuple[float, float]], 
+    def _get_point_tracks(self, aggregated_tokens_list, ps_idx, images: torch.Tensor, 
+                         query_points_original: List[Tuple[float, float]], 
                          original_size: Tuple[int, int], vggt_size: Tuple[int, int]) -> Dict:
         """Perform 3D point tracking with coordinate space conversion.
         
@@ -338,10 +345,12 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
         
         The tracking process:
         1. Convert 2D query points from original to VGGT coordinate space
-        2. Run VGGT's tracking pipeline (aggregator + track_head)
+        2. Run VGGT's tracking pipeline using pre-computed aggregated features
         3. Return 2D tracks in original coordinates and 3D tracks in world space
         
         Args:
+            aggregated_tokens_list: Pre-computed aggregated features from VGGT aggregator
+            ps_idx: Patch indices from VGGT aggregator
             images (torch.Tensor): Preprocessed image batch [N, C, H, W] 
             query_points_original (List[Tuple[float, float]]): Query points in original
                 image pixel coordinates
@@ -378,13 +387,10 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
         query_points_tensor = torch.FloatTensor(query_points_vggt).to(self._device)
         query_points_tensor = query_points_tensor[None]  # Add batch dimension [1, N, 2]
         
-        # Run VGGT's tracking pipeline with mixed precision
+        # Run VGGT's tracking pipeline using pre-computed features
         with torch.no_grad():
             with torch.amp.autocast('cuda', dtype=self.dtype):
-                # Extract features using VGGT's aggregator module
-                aggregated_tokens_list, ps_idx = self._model.aggregator(images)
-                
-                # Perform tracking using VGGT's track head
+                # Use pre-computed aggregated features for tracking
                 track_list, vis_score, conf_score = self._model.track_head(
                     aggregated_tokens_list, images, ps_idx, 
                     query_points=query_points_tensor
