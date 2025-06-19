@@ -96,7 +96,7 @@ class VGGTModel(fout.TorchImageModel):
             img: FiftyOne Sample object
             
         Returns:
-            Preprocessed image tensor
+            Dict with preprocessed tensor and filepath
         """
         # Get filepath from FiftyOne sample
         filepath = img.filepath
@@ -104,13 +104,11 @@ class VGGTModel(fout.TorchImageModel):
         # Use VGGT's built-in preprocessing
         images = load_and_preprocess_images([filepath]).to(self._device)
         
-        # Return the preprocessed tensor and store filepath for later use
-        # We need to store the filepath to access it in _predict_all
-        if not hasattr(self, '_current_filepaths'):
-            self._current_filepaths = []
-        self._current_filepaths.append(filepath)
-        
-        return images.squeeze(0)  # Remove batch dimension
+        # Return both the tensor and filepath
+        return {
+            "tensor": images.squeeze(0),  # Remove batch dimension
+            "filepath": filepath
+        }
 
     def _generate_query_points(self, height: int, width: int, num_points: int) -> List[Tuple[float, float]]:
         """Generate query points for tracking in original image coordinates."""
@@ -139,16 +137,14 @@ class VGGTModel(fout.TorchImageModel):
     def _predict_all(self, imgs):
         """Apply VGGT model to batch of preprocessed images."""
         
-        # Reset filepath tracking
-        self._current_filepaths = []
-        
-        # imgs are now preprocessed tensors from _preprocess_image
-        # Process each image individually 
+        # imgs are now dictionaries with tensor and filepath
         results = []
         
-        for i, img_tensor in enumerate(imgs):
+        for i, img_data in enumerate(imgs):
             try:
-                filepath = self._current_filepaths[i] if i < len(self._current_filepaths) else f"image_{i}"
+                img_tensor = img_data["tensor"]
+                filepath = img_data["filepath"]
+                
                 logger.info(f"Processing image {i+1}/{len(imgs)}: {filepath}")
                 
                 # Get original image size
@@ -199,7 +195,7 @@ class VGGTModel(fout.TorchImageModel):
             except Exception as e:
                 logger.error(f"Error processing image {i}: {e}")
                 # Add empty result to maintain batch consistency
-                filepath = self._current_filepaths[i] if i < len(self._current_filepaths) else f"image_{i}"
+                filepath = img_data.get("filepath", f"image_{i}")
                 results.append({
                     "predictions": None,
                     "track_data": None,
