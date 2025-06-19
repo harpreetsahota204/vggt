@@ -132,142 +132,146 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
         return model
 
     def predict_all(self, imgs, samples=None):
-        """Perform VGGT inference on a batch of images and save outputs.
+        """Perform VGGT inference on images (FiftyOne processes one at a time).
         
-        This is the main inference method that:
-        1. Preprocesses each image for VGGT (518px, proper aspect ratio)
-        2. Runs VGGT inference to get depth, pose, and confidence data
-        3. Generates automatic query points for 3D tracking
-        4. Saves auxiliary files (depth PNG, fo3d, keypoints JSON) alongside originals
-        5. Returns prediction data for the output processor
-        
-        All auxiliary files are saved in the same directory as the original image
-        with descriptive suffixes (_depth.png, .fo3d, _keypoints.json).
+        Note: Despite the name 'predict_all', FiftyOne actually calls this method
+        with single images, not batches.
 
         Args:
-            imgs (List[PIL.Image]): Batch of input images from FiftyOne
-            samples (List[fiftyone.core.sample.Sample]): Corresponding sample objects
-                containing filepath and other metadata. Required for file path access.
+            imgs: Single image tensor from FiftyOne preprocessing
+            samples: Single sample object containing filepath and metadata
                 
         Returns:
-            List[Dict]: Prediction data for each image, containing:
+            Single prediction dict containing:
                 - depth_map_path: Path to saved depth PNG for heatmap display
                 - vggt_output: Complete VGGT inference results
-                None entries indicate failed predictions.
         """
         # DEBUG: Check what we're actually receiving
         print(f"DEBUG: predict_all called with:")
-        print(f"DEBUG: imgs type: {type(imgs)}, length: {len(imgs) if hasattr(imgs, '__len__') else 'unknown'}")
-        print(f"DEBUG: samples type: {type(samples)}, length: {len(samples) if samples and hasattr(samples, '__len__') else 'unknown'}")
+        print(f"DEBUG: imgs type: {type(imgs)}")
+        print(f"DEBUG: samples type: {type(samples)}")
         
         if samples is None:
             raise ValueError("VGGT model requires sample objects to access filepaths")
         
-        # Handle the case where samples is passed as a tuple instead of list
-        if isinstance(samples, tuple):
-            print(f"DEBUG: Converting samples tuple to list")
-            samples = list(samples)
+        # FiftyOne passes single images and samples, not lists
+        img = imgs  # Single image tensor
+        sample = samples  # Single sample object
         
-        predictions = []
+        print(f"DEBUG: Processing single image, type: {type(img)}")
+        print(f"DEBUG: Sample type: {type(sample)}")
         
-        # DEBUG: Check individual items before unpacking
-        print(f"DEBUG: About to iterate. First img type: {type(imgs[0])}")
-        print(f"DEBUG: First sample type: {type(samples[0])}")
-        
-        for img, sample in zip(imgs, samples):
-            try:
-                # Extract file path information for saving auxiliary outputs
-                original_path = Path(sample.filepath)
-                base_dir = original_path.parent
-                base_name = original_path.stem
-                
-                # Define output paths for all auxiliary files
-                # These will be co-located with the original image
-                depth_png_path = base_dir / f"{base_name}_depth.png"      # Colorized depth for heatmap
-                fo3d_path = base_dir / f"{base_name}.fo3d"                # 3D point cloud
-                keypoints_path = base_dir / f"{base_name}_keypoints.json" # Tracking data
-                
-                # Preprocess image using VGGT-specific requirements
-                img_tensor, original_size = self._preprocess_vggt_image(img)
-                vggt_size = (img_tensor.shape[-1], img_tensor.shape[-2])  # (width, height)
-                
-                # Add batch dimension for model inference
-                img_batch = img_tensor.unsqueeze(0)
-                
-                # Run VGGT inference with automatic mixed precision
-                with torch.no_grad():
-                    with torch.amp.autocast('cuda', dtype=self.dtype):
-                        # Get aggregated features for tracking
-                        print("DEBUG: Getting aggregated features...")
+        try:
+            # Extract file path information for saving auxiliary outputs
+            original_path = Path(sample.filepath)
+            base_dir = original_path.parent
+            base_name = original_path.stem
+            
+            # Define output paths for all auxiliary files
+            # These will be co-located with the original image
+            depth_png_path = base_dir / f"{base_name}_depth.png"      # Colorized depth for heatmap
+            fo3d_path = base_dir / f"{base_name}.fo3d"                # 3D point cloud
+            keypoints_path = base_dir / f"{base_name}_keypoints.json" # Tracking data
+            
+            # Preprocess image using VGGT-specific requirements
+            img_tensor, original_size = self._preprocess_vggt_image(img)
+            vggt_size = (img_tensor.shape[-1], img_tensor.shape[-2])  # (width, height)
+            
+            # Add batch dimension for model inference
+            img_batch = img_tensor.unsqueeze(0)
+            
+            # Run VGGT inference with automatic mixed precision
+            with torch.no_grad():
+                with torch.amp.autocast('cuda', dtype=self.dtype):
+                    # Get aggregated features for tracking
+                    print("DEBUG: Getting aggregated features...")
+                    try:
                         aggregation_result = self._model.aggregator(img_batch)
-                        print(f"DEBUG: Aggregator returned {len(aggregation_result)} values")
+                        print(f"DEBUG: Aggregator returned {len(aggregation_result)} values - SUCCESS")
                         
                         if len(aggregation_result) == 2:
                             aggregated_tokens_list, ps_idx = aggregation_result
+                            print("DEBUG: Successfully unpacked aggregator results")
                         else:
                             print(f"DEBUG: Unexpected aggregator output: {len(aggregation_result)} values")
                             raise ValueError(f"aggregator returned {len(aggregation_result)} values, expected 2")
-                        
-                        # Run full VGGT model prediction
-                        print("DEBUG: Running full model prediction...")
+                    except Exception as e:
+                        print(f"DEBUG: Error in aggregator call: {e}")
+                        raise
+                    
+                    # Run full VGGT model prediction
+                    print("DEBUG: Running full model prediction...")
+                    try:
                         vggt_predictions = self._model(img_batch)
-                        print(f"DEBUG: Model prediction keys: {vggt_predictions.keys()}")
-                        
-                        # Convert VGGT's pose encoding to standard camera matrices
-                        print("DEBUG: Converting pose encoding...")
+                        print(f"DEBUG: Model prediction keys: {vggt_predictions.keys()} - SUCCESS")
+                    except Exception as e:
+                        print(f"DEBUG: Error in model prediction: {e}")
+                        raise
+                    
+                    # Convert VGGT's pose encoding to standard camera matrices
+                    print("DEBUG: Converting pose encoding...")
+                    try:
                         pose_result = pose_encoding_to_extri_intri(
                             vggt_predictions["pose_enc"], img_batch.shape[-2:]
                         )
-                        print(f"DEBUG: pose_encoding_to_extri_intri returned {len(pose_result)} values")
+                        print(f"DEBUG: pose_encoding_to_extri_intri returned {len(pose_result)} values - SUCCESS")
                         
                         if len(pose_result) == 2:
                             extrinsic, intrinsic = pose_result
+                            print("DEBUG: Successfully unpacked pose encoding results")
                         else:
                             print(f"DEBUG: Unexpected pose encoding output: {len(pose_result)} values")
                             raise ValueError(f"pose_encoding_to_extri_intri returned {len(pose_result)} values, expected 2")
-                
-                # Generate query points for 3D tracking in original image coordinates
-                query_points_original = self._generate_query_points(
-                    original_size[1], original_size[0], self.config.num_query_points
-                )
-                
-                # Perform 3D point tracking with coordinate space conversion
+                    except Exception as e:
+                        print(f"DEBUG: Error in pose encoding: {e}")
+                        raise
+            
+            # Generate query points for 3D tracking in original image coordinates
+            query_points_original = self._generate_query_points(
+                original_size[1], original_size[0], self.config.num_query_points
+            )
+            
+            # Perform 3D point tracking with coordinate space conversion
+            print("DEBUG: Starting point tracking...")
+            try:
                 track_data = self._get_point_tracks(
                     aggregated_tokens_list, ps_idx, img_batch, query_points_original, original_size, vggt_size
                 )
-                
-                # Package all VGGT outputs for file saving and processing
-                vggt_output = {
-                    "depth": vggt_predictions["depth"].cpu().numpy().squeeze(0),
-                    "depth_conf": vggt_predictions["depth_conf"].cpu().numpy().squeeze(0),
-                    "world_points_conf": vggt_predictions["world_points_conf"].cpu().numpy().squeeze(0),
-                    "extrinsic": extrinsic.cpu().numpy().squeeze(0),
-                    "intrinsic": intrinsic.cpu().numpy().squeeze(0),
-                    "images": img_tensor.cpu().numpy(),
-                    "point_tracks": track_data,
-                    "original_size": original_size,
-                    "vggt_size": vggt_size,
-                }
-                
-                # Save all auxiliary files for post-processing
-                self._save_depth_png(vggt_output, depth_png_path)
-                self._save_fo3d(vggt_output, fo3d_path)
-                self._save_keypoints(vggt_output, keypoints_path)
-                
-                # Package prediction data for output processor
-                prediction_data = {
-                    'depth_map_path': str(depth_png_path),  # Primary output for heatmap
-                    'vggt_output': vggt_output,             # Complete results for debugging
-                }
-                
-                predictions.append(prediction_data)
-                
+                print("DEBUG: Point tracking completed successfully")
             except Exception as e:
-                logger.error(f"Error processing sample {sample.filepath}: {e}")
-                # Return None for failed predictions to maintain batch consistency
-                predictions.append(None)
-        
-        return predictions
+                print(f"DEBUG: Error in point tracking: {e}")
+                raise
+            
+            # Package all VGGT outputs for file saving and processing
+            vggt_output = {
+                "depth": vggt_predictions["depth"].cpu().numpy().squeeze(0),
+                "depth_conf": vggt_predictions["depth_conf"].cpu().numpy().squeeze(0),
+                "world_points_conf": vggt_predictions["world_points_conf"].cpu().numpy().squeeze(0),
+                "extrinsic": extrinsic.cpu().numpy().squeeze(0),
+                "intrinsic": intrinsic.cpu().numpy().squeeze(0),
+                "images": img_tensor.cpu().numpy(),
+                "point_tracks": track_data,
+                "original_size": original_size,
+                "vggt_size": vggt_size,
+            }
+            
+            # Save all auxiliary files for post-processing
+            self._save_depth_png(vggt_output, depth_png_path)
+            self._save_fo3d(vggt_output, fo3d_path)
+            self._save_keypoints(vggt_output, keypoints_path)
+            
+            # Package prediction data for output processor
+            prediction_data = {
+                'depth_map_path': str(depth_png_path),  # Primary output for heatmap
+                'vggt_output': vggt_output,             # Complete results for debugging
+            }
+            
+            return prediction_data
+            
+        except Exception as e:
+            logger.error(f"Error processing sample {sample.filepath}: {e}")
+            # Return None for failed predictions
+            return None
 
     def _preprocess_vggt_image(self, img):
         """Preprocess image for VGGT model using VGGT's preprocessing logic."""
@@ -690,52 +694,30 @@ class VGGTOutputProcessor(fout.OutputProcessor):
         super().__init__(classes, **kwargs)
     
     def __call__(self, predictions, frame_size, confidence_thresh=None):
-        """Convert VGGT predictions into FiftyOne Heatmap labels.
+        """Convert VGGT prediction into FiftyOne Heatmap label.
         
-        Processes the prediction data from VGGTModel.predict_all() and creates
-        Heatmap labels that reference the saved depth PNG files. Each heatmap
-        provides a direct visual representation of the scene's depth structure.
-        
-        The depth maps are automatically displayed as color-coded overlays in
-        FiftyOne's image viewer, where:
-        - Blue regions represent near objects (small depth values)
-        - Red regions represent far objects (large depth values)
-        - The color scale is automatically normalized per image
+        Note: FiftyOne processes one prediction at a time, not batches.
         
         Args:
-            predictions (List[Dict]): Prediction data from VGGTModel.predict_all(),
-                where each dict contains:
-                - depth_map_path: Path to the saved depth PNG file
-                - vggt_output: Complete VGGT results (for debugging)
-                None entries indicate failed predictions.
-            frame_size (Tuple[int, int]): Image dimensions (width, height).
-                Unused for VGGT since depth maps are pre-sized to match originals.
-            confidence_thresh (float, optional): Unused parameter for compatibility
-                with other model types that support confidence filtering.
+            predictions: Single prediction dict from VGGTModel.predict_all()
+            frame_size: Image dimensions (width, height) - unused for VGGT
+            confidence_thresh: Unused parameter for compatibility
                 
         Returns:
-            List[fol.Heatmap]: FiftyOne Heatmap labels, one per input image.
-                Each heatmap references a depth PNG file via map_path.
-                None entries are returned for failed predictions.
+            fol.Heatmap: Single heatmap label or None for failed predictions
         """
-        heatmaps = []
-        
-        for pred_data in predictions:
-            # Handle failed predictions gracefully
-            if pred_data is None:
-                heatmaps.append(None)
-                continue
-                
-            try:
-                # Create FiftyOne Heatmap label pointing to depth PNG
-                heatmap = fol.Heatmap(
-                    label="depth_map",                    # Descriptive label for UI
-                    map_path=pred_data['depth_map_path']  # Path to colorized depth PNG
-                )
-                heatmaps.append(heatmap)
-                
-            except Exception as e:
-                logger.error(f"Error creating heatmap label: {e}")
-                heatmaps.append(None)
-        
-        return heatmaps
+        # Handle failed prediction
+        if predictions is None:
+            return None
+            
+        try:
+            # Create FiftyOne Heatmap label pointing to depth PNG
+            heatmap = fol.Heatmap(
+                label="depth_map",                      # Descriptive label for UI
+                map_path=predictions['depth_map_path']  # Path to colorized depth PNG
+            )
+            return heatmap
+            
+        except Exception as e:
+            logger.error(f"Error creating heatmap label: {e}")
+            return None
