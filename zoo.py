@@ -42,8 +42,6 @@ class VGGTModelConfig(fout.TorchImageModelConfig):
         self.model_path = self.parse_string(d, "model_path")
         self.confidence_threshold = self.parse_number(d, "confidence_threshold", default=25.0)
         self.num_query_points = self.parse_int(d, "num_query_points", default=50)
-        self.create_groups = self.parse_bool(d, "create_groups", default=True)
-        self.output_dir = self.parse_string(d, "output_dir", default=None)
 
 
 class VGGTModel(fout.TorchImageModel):
@@ -54,6 +52,9 @@ class VGGTModel(fout.TorchImageModel):
     """
 
     def __init__(self, config):
+        if not VGGT_AVAILABLE:
+            raise ImportError("VGGT is not installed. Please install it first.")
+            
         super().__init__(config)
         
         # Load the VGGT model
@@ -205,6 +206,7 @@ class VGGTModel(fout.TorchImageModel):
                 results, frame_sizes, confidence_thresh=self.config.confidence_threshold
             )
         
+        # Fallback: return raw results if no processor
         return results
 
     def _get_point_tracks(self, images: torch.Tensor, query_points_original: List[Tuple[float, float]], 
@@ -347,18 +349,9 @@ class VGGTOutputProcessor(fout.OutputProcessor):
         # Process each result
         for i, result in enumerate(results):
             if result["predictions"] is None:
-                depth_heatmaps.append(None)
                 point_keypoints.append(None)
                 fo3d_paths.append(None)
                 continue
-            
-            # Process depth map → heatmap
-            try:
-                depth_heatmap = self._create_depth_heatmap(result)
-                depth_heatmaps.append(depth_heatmap)
-            except Exception as e:
-                logger.error(f"Error creating depth heatmap for image {i}: {e}")
-                depth_heatmaps.append(None)
             
             # Process point tracks → keypoints
             try:
@@ -368,7 +361,7 @@ class VGGTOutputProcessor(fout.OutputProcessor):
                 logger.error(f"Error creating keypoints for image {i}: {e}")
                 point_keypoints.append(None)
             
-            # Process point cloud → fo3d
+            # Process point cloud → fo3d AND save depth map as PNG
             try:
                 fo3d_path = self._create_pointcloud_files(result, confidence_threshold)
                 fo3d_paths.append(fo3d_path)
@@ -378,14 +371,12 @@ class VGGTOutputProcessor(fout.OutputProcessor):
         
         # Create combined predictions for each sample
         combined_predictions = []
-        for i, (depth_heatmap, keypoints, fo3d_path, result) in enumerate(
-            zip(depth_heatmaps, point_keypoints, fo3d_paths, results)
+        for i, (keypoints, fo3d_path, result) in enumerate(
+            zip(point_keypoints, fo3d_paths, results)
         ):
             # Create a combined prediction object for this sample
             prediction = fo.DynamicEmbeddedDocument()
             
-            if depth_heatmap is not None:
-                prediction.depth = depth_heatmap
             if keypoints is not None:
                 prediction.keypoints = keypoints
             if fo3d_path is not None:
@@ -403,39 +394,6 @@ class VGGTOutputProcessor(fout.OutputProcessor):
             combined_predictions.append(prediction)
         
         return combined_predictions
-    
-    def _create_depth_heatmap(self, result: Dict) -> Optional[fol.Heatmap]:
-        """Create depth heatmap from VGGT predictions."""
-        depth = result["predictions"]["depth"]
-        orig_w, orig_h = result["original_size"]
-        
-        # Remove extra dimension if present
-        if depth.ndim == 3:
-            depth = depth.squeeze(-1)
-        
-        # Resize depth to match original image size
-        depth_resized = resize(
-            depth, (orig_h, orig_w),
-            preserve_range=True, anti_aliasing=True
-        )
-        
-        # Normalize to uint8 [0, 255]
-        valid_mask = np.isfinite(depth_resized) & (depth_resized > 0)
-        if np.any(valid_mask):
-            depth_min = np.percentile(depth_resized[valid_mask], 5)
-            depth_max = np.percentile(depth_resized[valid_mask], 95)
-            
-            if depth_max > depth_min:
-                depth_normalized = np.clip((depth_resized - depth_min) / (depth_max - depth_min), 0, 1)
-            else:
-                depth_normalized = np.zeros_like(depth_resized)
-        else:
-            depth_normalized = np.zeros_like(depth_resized)
-        
-        depth_normalized[~valid_mask] = 0
-        depth_uint8 = (depth_normalized * 255).astype(np.uint8)
-        
-        return fol.Heatmap(map=depth_uint8, range=[0, 255])
     
     def _create_point_keypoints(self, result: Dict) -> Optional[fol.Keypoints]:
         """Create keypoints from point tracks."""
@@ -465,25 +423,26 @@ class VGGTOutputProcessor(fout.OutputProcessor):
         return fol.Keypoints(keypoints=keypoints)
     
     def _create_pointcloud_files(self, result: Dict, confidence_threshold: float) -> Optional[str]:
-        """Create PCD and fo3d files for pointcloud output."""
+        """Create PCD, fo3d files, and save depth map as PNG."""
         filepath = result["filepath"]
         if not filepath:
             return None
             
-        # Determine output directory
-        if self.output_dir:
-            output_dir = Path(self.output_dir)
-            output_dir.mkdir(parents=True, exist_ok=True)
-        else:
-            output_dir = Path(filepath).parent
+        # Output directory is same as input image directory
+        output_dir = Path(filepath).parent
         
         # Generate output paths
         base_name = Path(filepath).stem
         pcd_path = output_dir / f"{base_name}.pcd"
         fo3d_path = output_dir / f"{base_name}.fo3d"
+        depth_png_path = output_dir / f"{base_name}_depth.png"
+        
+        predictions = result["predictions"]
+        
+        # Save depth map as PNG first
+        self._save_depth_map_png(predictions["depth"], depth_png_path, result["original_size"])
         
         # Create point cloud from depth
-        predictions = result["predictions"]
         world_points = unproject_depth_map_to_point_map(
             predictions["depth"],
             predictions["extrinsic"], 
@@ -527,3 +486,41 @@ class VGGTOutputProcessor(fout.OutputProcessor):
         except Exception as e:
             logger.error(f"Error converting PCD to fo3d: {e}")
             return None
+    
+    def _save_depth_map_png(self, depth: np.ndarray, output_path: Path, original_size: Tuple[int, int]):
+        """Save depth map as PNG image, resized to original image dimensions."""
+        # Remove extra dimensions
+        depth_vis = depth.squeeze()
+        
+        # Resize depth map to original image size
+        orig_w, orig_h = original_size
+        depth_resized = resize(
+            depth_vis,
+            (orig_h, orig_w),
+            preserve_range=True,
+            anti_aliasing=True
+        )
+        
+        # Handle invalid/infinite depths
+        valid_mask = np.isfinite(depth_resized) & (depth_resized > 0)
+        if np.any(valid_mask):
+            depth_min = np.percentile(depth_resized[valid_mask], 5)
+            depth_max = np.percentile(depth_resized[valid_mask], 95)
+            
+            # Normalize to 0-255 range
+            if depth_max > depth_min:
+                depth_normalized = np.clip((depth_resized - depth_min) / (depth_max - depth_min), 0, 1)
+            else:
+                depth_normalized = np.zeros_like(depth_resized)
+        else:
+            depth_normalized = np.zeros_like(depth_resized)
+        
+        depth_normalized[~valid_mask] = 0
+        depth_uint8 = (depth_normalized * 255).astype(np.uint8)
+        
+        # Apply colormap for better visualization
+        depth_colored = cv2.applyColorMap(depth_uint8, cv2.COLORMAP_JET)
+        
+        # Save as PNG
+        cv2.imwrite(str(output_path), depth_colored)
+        logger.info(f"Saved depth map to {output_path}")
