@@ -154,12 +154,20 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
         if samples is None:
             raise ValueError("VGGT model requires sample objects to access filepaths")
         
-        # FiftyOne passes single images and samples, not lists
-        img = imgs  # Single image tensor
-        sample = samples  # Single sample object
+        # FiftyOne passes containers with single items, extract them
+        if isinstance(imgs, list):
+            img = imgs[0]  # Extract single image from list
+        else:
+            img = imgs
+            
+        if isinstance(samples, (tuple, list)):
+            sample = samples[0]  # Extract single sample from tuple/list
+        else:
+            sample = samples
         
-        print(f"DEBUG: Processing single image, type: {type(img)}")
-        print(f"DEBUG: Sample type: {type(sample)}")
+        print(f"DEBUG: Extracted image type: {type(img)}")
+        print(f"DEBUG: Extracted sample type: {type(sample)}")
+        print(f"DEBUG: Sample has filepath: {hasattr(sample, 'filepath')}")
         
         try:
             # Extract file path information for saving auxiliary outputs
