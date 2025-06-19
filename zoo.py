@@ -155,10 +155,19 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
                 - vggt_output: Complete VGGT inference results
                 None entries indicate failed predictions.
         """
+        # DEBUG: Check what we're actually receiving
+        print(f"DEBUG: predict_all called with:")
+        print(f"DEBUG: imgs type: {type(imgs)}, length: {len(imgs) if hasattr(imgs, '__len__') else 'unknown'}")
+        print(f"DEBUG: samples type: {type(samples)}, length: {len(samples) if samples and hasattr(samples, '__len__') else 'unknown'}")
+        
         if samples is None:
             raise ValueError("VGGT model requires sample objects to access filepaths")
         
         predictions = []
+        
+        # DEBUG: Check individual items before unpacking
+        print(f"DEBUG: About to iterate. First img type: {type(imgs[0])}")
+        print(f"DEBUG: First sample type: {type(samples[0])}")
         
         for img, sample in zip(imgs, samples):
             try:
