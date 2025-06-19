@@ -742,6 +742,9 @@ import fiftyone.utils.torch as fout
 logger = logging.getLogger(__name__)
 
 
+# Remove the entrypoint function - model loading happens in _load_model
+
+
 class VGGTModelConfig(fout.TorchImageModelConfig):
     """Configuration for running a :class:`VGGTModel`.
 
@@ -897,6 +900,7 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
         original_size = img.size  # (width, height)
         
         target_size = 518
+        mode = "crop"  # Use VGGT's default mode
         
         # Handle RGBA images by blending onto white background
         if img.mode == "RGBA":
@@ -909,19 +913,45 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
         
         width, height = img.size
         
-        # Set width to 518px
-        new_width = target_size
-        # Calculate height maintaining aspect ratio, divisible by 14
-        new_height = round(height * (new_width / width) / 14) * 14
+        if mode == "pad":
+            # Make the largest dimension 518px while maintaining aspect ratio
+            if width >= height:
+                new_width = target_size
+                new_height = round(height * (new_width / width) / 14) * 14  # Make divisible by 14
+            else:
+                new_height = target_size
+                new_width = round(width * (new_height / height) / 14) * 14  # Make divisible by 14
+        else:  # mode == "crop"
+            # Set width to 518px
+            new_width = target_size
+            # Calculate height maintaining aspect ratio, divisible by 14
+            new_height = round(height * (new_width / width) / 14) * 14
         
         # Resize with new dimensions
         img = img.resize((new_width, new_height), Image.Resampling.BICUBIC)
         img_tensor = TF.to_tensor(img)  # Convert to tensor (0, 1), shape [C, H, W]
         
-        # Center crop height if it's larger than 518
-        if new_height > target_size:
+        # Center crop height if it's larger than 518 (only in crop mode)
+        if mode == "crop" and new_height > target_size:
             start_y = (new_height - target_size) // 2
             img_tensor = img_tensor[:, start_y : start_y + target_size, :]
+        
+        # For pad mode, pad to make a square of target_size x target_size
+        if mode == "pad":
+            h_padding = target_size - img_tensor.shape[1]
+            w_padding = target_size - img_tensor.shape[2]
+            
+            if h_padding > 0 or w_padding > 0:
+                pad_top = h_padding // 2
+                pad_bottom = h_padding - pad_top
+                pad_left = w_padding // 2
+                pad_right = w_padding - pad_left
+                
+                # Pad with white (value=1.0)
+                img_tensor = torch.nn.functional.pad(
+                    img_tensor, (pad_left, pad_right, pad_top, pad_bottom), 
+                    mode="constant", value=1.0
+                )
         
         # Move to device
         img_tensor = img_tensor.to(self._device)
