@@ -1,4 +1,3 @@
-
 import logging
 import numpy as np
 import torch
@@ -22,11 +21,9 @@ import fiftyone.utils.torch as fout
 
 logger = logging.getLogger(__name__)
 
+
 class VGGTModelConfig(fout.TorchImageModelConfig):
     """Configuration for running a :class:`VGGTModel`.
-
-    See :class:`fiftyone.utils.torch.TorchImageModelConfig` for additional
-    arguments.
 
     Args:
         model_name: the VGGT model name to load
@@ -37,7 +34,6 @@ class VGGTModelConfig(fout.TorchImageModelConfig):
 
     def __init__(self, d):
         super().__init__(d)
-
         self.model_name = self.parse_string(d, "model_name", default="facebook/VGGT-1B")
         self.model_path = self.parse_string(d, "model_path")
         self.confidence_threshold = self.parse_number(d, "confidence_threshold", default=25.0)
@@ -52,7 +48,6 @@ class VGGTModel(fout.TorchImageModel):
     """
 
     def __init__(self, config):
-
         super().__init__(config)
         
         # Load the VGGT model
@@ -68,7 +63,10 @@ class VGGTModel(fout.TorchImageModel):
     def _load_model(self, config):
         """Load the VGGT model from disk."""
         if not os.path.exists(config.model_path):
-            raise FileNotFoundError(f"Model file not found: {config.model_path}")
+            # If model file doesn't exist, try loading directly from HuggingFace
+            logger.info(f"Model file not found at {config.model_path}, loading from HuggingFace...")
+            model = VGGT.from_pretrained(config.model_name)
+            return model
         
         logger.info(f"Loading VGGT model from {config.model_path}")
         
@@ -90,6 +88,29 @@ class VGGTModel(fout.TorchImageModel):
         model = model.to(self._device)
         model.eval()
         return model
+
+    def _preprocess_image(self, img):
+        """Preprocess image for VGGT model.
+        
+        Args:
+            img: FiftyOne Sample object
+            
+        Returns:
+            Preprocessed image tensor
+        """
+        # Get filepath from FiftyOne sample
+        filepath = img.filepath
+        
+        # Use VGGT's built-in preprocessing
+        images = load_and_preprocess_images([filepath]).to(self._device)
+        
+        # Return the preprocessed tensor and store filepath for later use
+        # We need to store the filepath to access it in _predict_all
+        if not hasattr(self, '_current_filepaths'):
+            self._current_filepaths = []
+        self._current_filepaths.append(filepath)
+        
+        return images.squeeze(0)  # Remove batch dimension
 
     def _generate_query_points(self, height: int, width: int, num_points: int) -> List[Tuple[float, float]]:
         """Generate query points for tracking in original image coordinates."""
@@ -116,33 +137,26 @@ class VGGTModel(fout.TorchImageModel):
         return query_points[:num_points]
 
     def _predict_all(self, imgs):
-        """Apply VGGT model to batch of images and create FiftyOne outputs."""
+        """Apply VGGT model to batch of preprocessed images."""
         
-        # Handle different input types and get filepaths
-        filepaths = []
-        for img in imgs:
-            if hasattr(img, 'filepath'):
-                filepaths.append(img.filepath)
-            elif isinstance(img, str):
-                filepaths.append(img)
-            else:
-                # For tensor/array inputs, we'd need to save temporarily
-                raise ValueError("VGGT FiftyOne integration requires image file paths")
+        # Reset filepath tracking
+        self._current_filepaths = []
         
+        # imgs are now preprocessed tensors from _preprocess_image
         # Process each image individually 
         results = []
-        fo3d_paths = []
         
-        for i, filepath in enumerate(filepaths):
+        for i, img_tensor in enumerate(imgs):
             try:
-                logger.info(f"Processing image {i+1}/{len(filepaths)}: {filepath}")
+                filepath = self._current_filepaths[i] if i < len(self._current_filepaths) else f"image_{i}"
+                logger.info(f"Processing image {i+1}/{len(imgs)}: {filepath}")
                 
                 # Get original image size
                 original_image = Image.open(filepath)
                 original_size = original_image.size  # (width, height)
                 
-                # Load and preprocess for VGGT
-                images = load_and_preprocess_images([filepath]).to(self._device)
+                # Add batch dimension back for VGGT processing
+                images = img_tensor.unsqueeze(0)
                 vggt_size = (images.shape[-1], images.shape[-2])  # (width, height)
                 
                 # Run VGGT inference
@@ -171,7 +185,7 @@ class VGGTModel(fout.TorchImageModel):
                 # Get point tracks with coordinate conversion
                 track_data = self._get_point_tracks(images, query_points, original_size, vggt_size)
                 
-                # Process outputs based on configuration
+                # Store result
                 result = {
                     "predictions": predictions,
                     "track_data": track_data,
@@ -185,6 +199,7 @@ class VGGTModel(fout.TorchImageModel):
             except Exception as e:
                 logger.error(f"Error processing image {i}: {e}")
                 # Add empty result to maintain batch consistency
+                filepath = self._current_filepaths[i] if i < len(self._current_filepaths) else f"image_{i}"
                 results.append({
                     "predictions": None,
                     "track_data": None,
@@ -194,17 +209,13 @@ class VGGTModel(fout.TorchImageModel):
                     "error": str(e)
                 })
         
-        # Process outputs with single unified processor
+        # Process outputs with unified processor
         if self._output_processor is not None:
-            # Extract frame sizes for processor
             frame_sizes = [result["original_size"] for result in results]
-            
-            # Use output processor to get all outputs at once
             return self._output_processor(
                 results, frame_sizes, confidence_thresh=self.config.confidence_threshold
             )
         
-        # Fallback: return raw results if no processor
         return results
 
     def _get_point_tracks(self, images: torch.Tensor, query_points_original: List[Tuple[float, float]], 
@@ -230,9 +241,9 @@ class VGGTModel(fout.TorchImageModel):
         
         with torch.no_grad():
             with torch.amp.autocast('cuda', dtype=self.dtype):
-                aggregated_tokens_list, ps_idx = self._vggt_model.aggregator(images[None])
+                aggregated_tokens_list, ps_idx = self._vggt_model.aggregator(images)
                 track_list, vis_score, conf_score = self._vggt_model.track_head(
-                    aggregated_tokens_list, images[None], ps_idx, 
+                    aggregated_tokens_list, images, ps_idx, 
                     query_points=query_points_tensor
                 )
         
@@ -257,131 +268,43 @@ class VGGTModel(fout.TorchImageModel):
             "confidence_scores": _convert_to_list(conf_score),
         }
 
-    def _create_pointcloud_files(self, predictions: Dict, filepath: str) -> Optional[str]:
-        """Create PCD and fo3d files for pointcloud output."""
-        try:
-            # Determine output directory
-            if self.config.output_dir:
-                output_dir = Path(self.config.output_dir)
-                output_dir.mkdir(parents=True, exist_ok=True)
-            else:
-                output_dir = Path(filepath).parent
-            
-            # Generate output paths
-            base_name = Path(filepath).stem
-            pcd_path = output_dir / f"{base_name}.pcd"
-            fo3d_path = output_dir / f"{base_name}.fo3d"
-            
-            # Create point cloud from depth
-            world_points = unproject_depth_map_to_point_map(
-                predictions["depth"],
-                predictions["extrinsic"], 
-                predictions["intrinsic"]
-            )
-            
-            # Get colors from input image
-            colors = predictions["images"].transpose(1, 2, 0)  # (H, W, 3)
-            confidence = predictions["depth_conf"]  # (H, W)
-            
-            # Flatten for point cloud
-            H, W = world_points.shape[:2]
-            points = world_points.reshape(-1, 3)
-            colors_flat = (colors.reshape(-1, 3) * 255).astype(np.uint8)
-            conf_flat = confidence.reshape(-1)
-            
-            # Apply confidence threshold
-            threshold_val = np.percentile(conf_flat, self.config.confidence_threshold)
-            mask = (conf_flat >= threshold_val) & (conf_flat > 0.1)
-            
-            # Create Open3D point cloud
-            pcd = o3d.geometry.PointCloud()
-            pcd.points = o3d.utility.Vector3dVector(points[mask].astype(np.float32))
-            pcd.colors = o3d.utility.Vector3dVector(colors_flat[mask].astype(np.float32) / 255.0)
-            
-            # Save PCD
-            o3d.io.write_point_cloud(str(pcd_path), pcd, write_ascii=False)
-            logger.info(f"Saved {np.sum(mask):,} points to {pcd_path}")
-            
-            # Convert to fo3d
-            scene = fo.Scene()
-            scene.camera = fo.PerspectiveCamera(up="Z")
-            mesh = fo.PointCloud("pointcloud", str(pcd_path))
-            scene.add(mesh)
-            scene.write(str(fo3d_path))
-            
-            logger.info(f"Converted to fo3d: {fo3d_path}")
-            return str(fo3d_path)
-            
-        except Exception as e:
-            logger.error(f"Error creating pointcloud files for {filepath}: {e}")
-            return None
-
-    def _create_fiftyone_outputs(self, results: List[Dict]) -> Dict:
-        """DEPRECATED: Outputs are now handled by VGGTOutputProcessor."""
-        # This method is no longer used but kept for compatibility
-        return {}
-
-    def _create_grouped_samples(self, results: List[Dict]) -> List[fo.Sample]:
-        """DEPRECATED: Grouped dataset creation is now handled by _convert_to_grouped_dataset function."""
-        # This method is no longer used but kept for compatibility
-        return []
-
 
 class VGGTOutputProcessor(fout.OutputProcessor):
-    """Unified output processor for all VGGT outputs: depth, points, and pointcloud."""
+    """Unified output processor for all VGGT outputs: keypoints, pointcloud, and depth PNG."""
     
-    def __init__(self, confidence_threshold=25.0, output_dir=None, **kwargs):
+    def __init__(self, confidence_threshold=25.0, **kwargs):
         super().__init__(**kwargs)
         self.confidence_threshold = confidence_threshold
-        self.output_dir = output_dir
         
     def __call__(self, results, frame_sizes, confidence_thresh=None):
         """Process all VGGT outputs and return labels for FiftyOne apply_model."""
         confidence_threshold = confidence_thresh or self.confidence_threshold
         
-        # Initialize output containers
-        depth_heatmaps = []
-        point_keypoints = []
-        fo3d_paths = []
-        
         # Process each result
-        for i, result in enumerate(results):
-            if result["predictions"] is None:
-                point_keypoints.append(None)
-                fo3d_paths.append(None)
-                continue
-            
-            # Process point tracks → keypoints
-            try:
-                point_keypoints_obj = self._create_point_keypoints(result)
-                point_keypoints.append(point_keypoints_obj)
-            except Exception as e:
-                logger.error(f"Error creating keypoints for image {i}: {e}")
-                point_keypoints.append(None)
-            
-            # Process point cloud → fo3d AND save depth map as PNG
-            try:
-                fo3d_path = self._create_pointcloud_files(result, confidence_threshold)
-                fo3d_paths.append(fo3d_path)
-            except Exception as e:
-                logger.error(f"Error creating point cloud for image {i}: {e}")
-                fo3d_paths.append(None)
-        
-        # Create combined predictions for each sample
         combined_predictions = []
-        for i, (keypoints, fo3d_path, result) in enumerate(
-            zip(point_keypoints, fo3d_paths, results)
-        ):
-            # Create a combined prediction object for this sample
+        
+        for i, result in enumerate(results):
+            # Create prediction object for this sample
             prediction = fo.DynamicEmbeddedDocument()
             
-            if keypoints is not None:
-                prediction.keypoints = keypoints
-            if fo3d_path is not None:
-                prediction.fo3d_path = fo3d_path
-                
-            # Add metadata
             if result["predictions"] is not None:
+                # Process point tracks → keypoints
+                try:
+                    keypoints = self._create_point_keypoints(result)
+                    if keypoints is not None:
+                        prediction.keypoints = keypoints
+                except Exception as e:
+                    logger.error(f"Error creating keypoints for image {i}: {e}")
+                
+                # Process point cloud → fo3d AND save depth map as PNG
+                try:
+                    fo3d_path = self._create_pointcloud_files(result, confidence_threshold)
+                    if fo3d_path is not None:
+                        prediction.fo3d_path = fo3d_path
+                except Exception as e:
+                    logger.error(f"Error creating point cloud for image {i}: {e}")
+                
+                # Add metadata
                 prediction.metadata = fo.DynamicEmbeddedDocument(
                     confidence_threshold=confidence_threshold,
                     original_size=result["original_size"],
