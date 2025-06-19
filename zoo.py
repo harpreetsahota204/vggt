@@ -80,13 +80,17 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
     def __init__(self, config):
         super().__init__(config)
         
+        # Explicitly set device
+        self._device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
         # Determine optimal precision based on GPU capabilities
-        # Ampere GPUs (RTX 30xx+) support bfloat16 for better numerical stability
         if torch.cuda.is_available():
             capability = torch.cuda.get_device_capability()
             self.dtype = torch.bfloat16 if capability[0] >= 8 else torch.float16
         else:
             self.dtype = torch.float32
+        
+        self._fields = {}
 
         @property
         def needs_fields(self):
@@ -227,27 +231,36 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
         return predictions
 
     def _preprocess_vggt_image(self, img):
-        """Preprocess PIL image for VGGT model using VGGT's preprocessing logic."""
-        # Ensure we have a PIL Image, not a tensor
+        """Preprocess image for VGGT model using VGGT's preprocessing logic."""
+        # Handle both PIL Images and tensors
         if isinstance(img, torch.Tensor):
-            raise TypeError("Expected PIL Image, got torch.Tensor. Make sure the input to _preprocess_vggt_image is a PIL Image.")
-        
-        # Store original size
-        original_size = img.size  # (width, height)
+            # Convert tensor back to PIL Image for our custom preprocessing
+            if img.dim() == 3 and img.shape[0] in [1, 3, 4]:  # CHW format
+                # Assuming the tensor is already normalized to [0, 1]
+                img_pil = TF.to_pil_image(img)
+            else:
+                raise ValueError(f"Unexpected tensor shape: {img.shape}. Expected CHW format with 1, 3, or 4 channels.")
+            
+            # Get original size from the tensor dimensions
+            original_size = (img.shape[2], img.shape[1])  # (width, height)
+        else:
+            # Already a PIL Image
+            img_pil = img
+            original_size = img_pil.size  # (width, height)
         
         target_size = 518
         
         # Handle RGBA images by blending onto white background
-        if img.mode == "RGBA":
-            img = Image.alpha_composite(
-                img.convert("RGBA"), 
-                Image.new("RGBA", img.size, (255, 255, 255, 255))
+        if img_pil.mode == "RGBA":
+            img_pil = Image.alpha_composite(
+                img_pil.convert("RGBA"), 
+                Image.new("RGBA", img_pil.size, (255, 255, 255, 255))
             ).convert("RGB")
-        elif img.mode != "RGB":
+        elif img_pil.mode != "RGB":
             # Convert to RGB if not already
-            img = img.convert("RGB")
+            img_pil = img_pil.convert("RGB")
         
-        width, height = img.size
+        width, height = img_pil.size
         
         # Set width to 518px
         new_width = target_size
@@ -255,8 +268,8 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
         new_height = round(height * (new_width / width) / 14) * 14
         
         # Resize with new dimensions
-        img = img.resize((new_width, new_height), Image.Resampling.BICUBIC)
-        img_tensor = TF.to_tensor(img)  # Convert to tensor (0, 1), shape [C, H, W]
+        img_pil = img_pil.resize((new_width, new_height), Image.Resampling.BICUBIC)
+        img_tensor = TF.to_tensor(img_pil)  # Convert to tensor (0, 1), shape [C, H, W]
         
         # Center crop height if it's larger than 518
         if new_height > target_size:
