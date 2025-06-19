@@ -91,14 +91,14 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
             self.dtype = torch.float32
         self._fields = {}
 
-        @property
-        def needs_fields(self):
-            """A dict mapping model-specific keys to sample field names."""
-            return self._fields
+    @property
+    def needs_fields(self):
+        """A dict mapping model-specific keys to sample field names."""
+        return self._fields
 
-        @needs_fields.setter
-        def needs_fields(self, fields):
-            self._fields = fields
+    @needs_fields.setter
+    def needs_fields(self, fields):
+        self._fields = fields
 
     def _load_model(self, config):
         """Load the pre-downloaded VGGT model from disk.
@@ -355,9 +355,10 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
                 - visibility_scores: Per-point visibility confidence
                 - confidence_scores: Per-point tracking confidence
         """
+        # Handle empty query points case
         if not query_points_original:
             return {"tracks_2d": [], "tracks_3d": [], "query_points_original": [], 
-                "visibility_scores": [], "confidence_scores": []}
+                   "visibility_scores": [], "confidence_scores": []}
         
         # Ensure all tensors are on the same device to avoid CUDA errors
         images = images.to(self._device)
@@ -381,13 +382,11 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
         with torch.no_grad():
             with torch.amp.autocast('cuda', dtype=self.dtype):
                 # Extract features using VGGT's aggregator module
-                aggregated_tokens_list, patch_start_idx = self._model.aggregator(images)
+                aggregated_tokens_list, ps_idx = self._model.aggregator(images)
                 
-                # Perform tracking using VGGT's track head - use correct parameter name
+                # Perform tracking using VGGT's track head
                 track_list, vis_score, conf_score = self._model.track_head(
-                    aggregated_tokens_list, 
-                    images=images,
-                    patch_start_idx=patch_start_idx,  # Changed from ps_idx to patch_start_idx
+                    aggregated_tokens_list, images, ps_idx, 
                     query_points=query_points_tensor
                 )
         
@@ -403,20 +402,16 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
             else:
                 return data
         
-        # The track_list is a list of tensors (for each iteration), we want the last one
-        if isinstance(track_list, list):
-            # From the source code, we need to use the last iteration result
-            tracks_3d = _convert_to_list(track_list[-1])
-        else:
-            tracks_3d = _convert_to_list(track_list)
+        # Convert tracking outputs to serializable format
+        tracks_3d = _convert_to_list(track_list)
         
         return {
-            "tracks_2d": query_points_original,                  # 2D in original coordinates
-            "tracks_3d": tracks_3d,                             # 3D in world coordinates
-            "query_points_original": query_points_original,     # For reference
-            "query_points_vggt": query_points_vggt,            # For debugging
-            "visibility_scores": _convert_to_list(vis_score),   # Per-point visibility
-            "confidence_scores": _convert_to_list(conf_score),  # Per-point confidence
+            "tracks_2d": query_points_original,                    # 2D in original coordinates
+            "tracks_3d": tracks_3d,                               # 3D in world coordinates
+            "query_points_original": query_points_original,       # For reference
+            "query_points_vggt": query_points_vggt,              # For debugging
+            "visibility_scores": _convert_to_list(vis_score),     # Per-point visibility
+            "confidence_scores": _convert_to_list(conf_score),    # Per-point confidence
         }
 
     def _save_depth_png(self, vggt_output: Dict, output_path: Path):
