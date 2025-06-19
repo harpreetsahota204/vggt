@@ -30,7 +30,6 @@ def download_model(model_name, model_path):
         raise ValueError(f"Unsupported model name '{model_name}'. "
                         f"Supported models: {list(MODEL_VARIANTS.keys())}")
     
-    
     model_info = MODEL_VARIANTS[model_name]
     
     # Ensure the directory exists
@@ -38,15 +37,11 @@ def download_model(model_name, model_path):
     
     logger.info(f"Downloading VGGT model {model_name}...")
     
-    # Load model from HuggingFace and save to disk
+    # Load model from HuggingFace
     model = VGGT.from_pretrained(model_name)
     
-    # Save the model state dict to the specified path
-    torch.save({
-        'model_state_dict': model.state_dict(),
-        'model_name': model_name,
-        'model_info': model_info,
-    }, model_path)
+    # Save the COMPLETE model (architecture + weights) to disk
+    torch.save(model, model_path)
     
     logger.info(f"VGGT model {model_name} saved to {model_path}")
 
