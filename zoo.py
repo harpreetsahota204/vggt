@@ -194,17 +194,44 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
                     # Get aggregated features for tracking
                     print("DEBUG: Getting aggregated features...")
                     try:
+                        # Don't unpack immediately, check what we get first
                         aggregation_result = self._model.aggregator(img_batch)
-                        print(f"DEBUG: Aggregator returned {len(aggregation_result)} values - SUCCESS")
+                        print(f"DEBUG: Aggregator returned type: {type(aggregation_result)}")
                         
-                        if len(aggregation_result) == 2:
-                            aggregated_tokens_list, ps_idx = aggregation_result
-                            print("DEBUG: Successfully unpacked aggregator results")
+                        if isinstance(aggregation_result, (list, tuple)):
+                            print(f"DEBUG: Aggregator returned {len(aggregation_result)} values")
+                            print(f"DEBUG: Types: {[type(x) for x in aggregation_result]}")
+                            
+                            # Handle different return patterns
+                            if len(aggregation_result) == 2:
+                                aggregated_tokens_list, ps_idx = aggregation_result
+                                print("DEBUG: Successfully unpacked 2 values from aggregator")
+                            elif len(aggregation_result) == 4:
+                                # Maybe it returns 4 values instead of 2?
+                                aggregated_tokens_list, ps_idx, extra1, extra2 = aggregation_result
+                                print(f"DEBUG: Got 4 values from aggregator, extras: {type(extra1)}, {type(extra2)}")
+                            elif len(aggregation_result) == 5:
+                                # Maybe it returns 5 values?
+                                aggregated_tokens_list, ps_idx, extra1, extra2, extra3 = aggregation_result
+                                print(f"DEBUG: Got 5 values from aggregator")
+                            else:
+                                raise ValueError(f"Unexpected aggregator output: {len(aggregation_result)} values")
                         else:
-                            print(f"DEBUG: Unexpected aggregator output: {len(aggregation_result)} values")
-                            raise ValueError(f"aggregator returned {len(aggregation_result)} values, expected 2")
+                            print(f"DEBUG: Aggregator returned single value of type: {type(aggregation_result)}")
+                            # Handle case where it returns a single object
+                            aggregated_tokens_list = aggregation_result
+                            ps_idx = None
+                            
                     except Exception as e:
                         print(f"DEBUG: Error in aggregator call: {e}")
+                        print(f"DEBUG: Error type: {type(e)}")
+                        # Let's try calling it differently - maybe it needs different arguments?
+                        try:
+                            print("DEBUG: Trying aggregator without batch dimension...")
+                            aggregation_result = self._model.aggregator(img_tensor)
+                            print(f"DEBUG: Alternative call worked, got: {type(aggregation_result)}")
+                        except Exception as e2:
+                            print(f"DEBUG: Alternative call also failed: {e2}")
                         raise
                     
                     # Run full VGGT model prediction
