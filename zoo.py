@@ -163,6 +163,11 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
         if samples is None:
             raise ValueError("VGGT model requires sample objects to access filepaths")
         
+        # Handle the case where samples is passed as a tuple instead of list
+        if isinstance(samples, tuple):
+            print(f"DEBUG: Converting samples tuple to list")
+            samples = list(samples)
+        
         predictions = []
         
         # DEBUG: Check individual items before unpacking
