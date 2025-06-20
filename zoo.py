@@ -366,7 +366,7 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
         return best_axis
 
     def _determine_scene_camera_setup(self, vggt_output):
-        """Determine both camera position and up direction for the scene."""
+        """Determine camera position, look_at point, and up direction for the scene."""
         
         # Extract camera parameters
         camera_params = self._extract_camera_parameters(vggt_output)
@@ -374,17 +374,28 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
         if camera_params is None:
             # Fallback to just up direction
             up_direction = self._determine_camera_up_direction(vggt_output["extrinsic"])
-            return {"up": up_direction, "center": None}
+            return {"up": up_direction, "position": None, "look_at": None}
         
         # Determine up direction
         up_direction = self._determine_camera_up_direction(vggt_output["extrinsic"])
         
-        # Camera position for scene viewing
+        # Camera position and forward direction
         camera_position = camera_params["position"]
+        camera_forward = camera_params["forward"]
+        
+        # Calculate where the camera is looking (position + forward direction)
+        # Use a reasonable distance for the look_at point
+        look_distance = 5.0  # Look 5 units ahead in the forward direction
+        look_at_point = [
+            camera_position[0] + camera_forward[0] * look_distance,
+            camera_position[1] + camera_forward[1] * look_distance,
+            camera_position[2] + camera_forward[2] * look_distance
+        ]
         
         return {
             "up": up_direction,
-            "center": camera_position,  # Position the scene camera at the VGGT camera location
+            "position": camera_position,     # Where the camera is located
+            "look_at": look_at_point,        # Where the camera is looking
             "camera_params": camera_params
         }
 
@@ -450,12 +461,27 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
             scene = fo.Scene()
             
             # Set up camera with VGGT camera position and orientation
-            if camera_setup["center"] is not None:
-                scene.camera = fo.PerspectiveCamera(
-                    center=camera_setup["center"],  # Position camera at VGGT camera location
-                    up=camera_setup["up"]           # Set up direction based on camera pose
+            if camera_setup["position"] is not None:
+                from fiftyone.core.threed.transformation import Vector3
+                
+                position_vec = Vector3(
+                    x=float(camera_setup["position"][0]),
+                    y=float(camera_setup["position"][1]), 
+                    z=float(camera_setup["position"][2])
                 )
-                logger.debug(f"Positioned camera at {camera_setup['center']} with up={camera_setup['up']}")
+                look_at_vec = Vector3(
+                    x=float(camera_setup["look_at"][0]),
+                    y=float(camera_setup["look_at"][1]),
+                    z=float(camera_setup["look_at"][2])
+                )
+                
+                scene.camera = fo.PerspectiveCamera(
+                    position=position_vec,        # Where the camera is located
+                    look_at=look_at_vec,          # Where the camera is looking
+                    up=camera_setup["up"],        # Up direction based on camera pose
+                    fov=50.0                      # Default field of view
+                )
+                logger.debug(f"Positioned camera at {camera_setup['position']} looking at {camera_setup['look_at']} with up={camera_setup['up']}")
             else:
                 # Fallback to just up direction
                 scene.camera = fo.PerspectiveCamera(up=camera_setup["up"])
