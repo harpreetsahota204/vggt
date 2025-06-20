@@ -444,14 +444,14 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
         }
 
     def _save_depth_png(self, vggt_output: Dict, output_path: Path):
-        """Save depth map as a colorized PNG for FiftyOne heatmap visualization.
+        """Save depth map as a colorized PNG at VGGT's native resolution.
         
         Converts VGGT's raw depth predictions into a visually interpretable
         colorized image that can be displayed as a heatmap in FiftyOne. The depth
         values are normalized and colored using OpenCV's JET colormap.
         
         Processing steps:
-        1. Resize depth map to match original image dimensions
+        1. Keep depth map at VGGT's native resolution (no resizing)
         2. Handle invalid/infinite depth values
         3. Normalize to [0, 255] range using percentile scaling
         4. Apply JET colormap for visualization
@@ -465,35 +465,30 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
             # Extract depth map and remove any extra dimensions
             depth_vis = vggt_output["depth"].squeeze()
             
-            # Resize depth map to match original image dimensions
-            # This ensures the heatmap aligns perfectly with the original image
-            orig_w, orig_h = vggt_output["original_size"]
-            depth_resized = resize(
-                depth_vis,
-                (orig_h, orig_w),                    # Target size (height, width)
-                preserve_range=True,                 # Keep original value range
-                anti_aliasing=True                   # Smooth resizing
-            )
+            # Keep depth at VGGT's native resolution - no resizing
+            # This preserves the quality and accuracy of the depth predictions
+            vggt_w, vggt_h = vggt_output["vggt_size"]
+            logger.debug(f"Keeping depth map at VGGT resolution: {depth_vis.shape} (VGGT size: {vggt_w}x{vggt_h})")
             
             # Handle invalid depth values (NaN, infinity, negative)
-            valid_mask = np.isfinite(depth_resized) & (depth_resized > 0)
+            valid_mask = np.isfinite(depth_vis) & (depth_vis > 0)
             
             if np.any(valid_mask):
                 # Use robust percentile-based normalization to handle outliers
-                depth_min = np.percentile(depth_resized[valid_mask], 5)   # Ignore bottom 5%
-                depth_max = np.percentile(depth_resized[valid_mask], 95)  # Ignore top 5%
+                depth_min = np.percentile(depth_vis[valid_mask], 5)   # Ignore bottom 5%
+                depth_max = np.percentile(depth_vis[valid_mask], 95)  # Ignore top 5%
                 
                 # Normalize to [0, 1] range
                 if depth_max > depth_min:
                     depth_normalized = np.clip(
-                        (depth_resized - depth_min) / (depth_max - depth_min), 0, 1
+                        (depth_vis - depth_min) / (depth_max - depth_min), 0, 1
                     )
                 else:
                     # Handle edge case where all valid depths are the same
-                    depth_normalized = np.zeros_like(depth_resized)
+                    depth_normalized = np.zeros_like(depth_vis)
             else:
                 # No valid depth values found
-                depth_normalized = np.zeros_like(depth_resized)
+                depth_normalized = np.zeros_like(depth_vis)
             
             # Set invalid regions to zero (will appear as dark blue in JET colormap)
             depth_normalized[~valid_mask] = 0
@@ -506,7 +501,7 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
             
             # Save as PNG (lossless compression)
             cv2.imwrite(str(output_path), depth_colored)
-            logger.debug(f"Saved depth map to {output_path}")
+            logger.debug(f"Saved depth map at native resolution to {output_path}")
             
         except Exception as e:
             logger.error(f"Error saving depth PNG to {output_path}: {e}")
