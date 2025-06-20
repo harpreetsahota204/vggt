@@ -58,9 +58,6 @@ def load_model(
         model_name: the name of the model to load
         model_path: the absolute filename to which the model was downloaded
         confidence_threshold: confidence threshold for point cloud filtering (percentile)
-        num_query_points: number of points to automatically select for tracking
-        create_groups: whether to create grouped datasets with 3D visualization
-        output_dir: directory to save PCD and fo3d files (optional)
         **kwargs: additional keyword arguments
         
     Returns:
