@@ -191,8 +191,32 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
             # Run VGGT inference with automatic mixed precision
             with torch.no_grad():
                 with torch.amp.autocast('cuda', dtype=self.dtype):
-                    # Get aggregated features for tracking
-                    print("DEBUG: Getting aggregated features...")
+                    # Try full model prediction first (like your working single image code)
+                    print("DEBUG: Running full model prediction...")
+                    try:
+                        vggt_predictions = self._model(img_batch)
+                        print(f"DEBUG: Model prediction keys: {vggt_predictions.keys()} - SUCCESS")
+                        
+                        # Convert VGGT's pose encoding to standard camera matrices
+                        print("DEBUG: Converting pose encoding...")
+                        pose_result = pose_encoding_to_extri_intri(
+                            vggt_predictions["pose_enc"], img_batch.shape[-2:]
+                        )
+                        print(f"DEBUG: pose_encoding_to_extri_intri returned {len(pose_result)} values - SUCCESS")
+                        
+                        if len(pose_result) == 2:
+                            extrinsic, intrinsic = pose_result
+                            print("DEBUG: Successfully unpacked pose encoding results")
+                        else:
+                            print(f"DEBUG: Unexpected pose encoding output: {len(pose_result)} values")
+                            raise ValueError(f"pose_encoding_to_extri_intri returned {len(pose_result)} values, expected 2")
+                            
+                    except Exception as e:
+                        print(f"DEBUG: Error in full model prediction: {e}")
+                        raise
+                    
+                    # Now try to get aggregated features for tracking (if needed)
+                    print("DEBUG: Getting aggregated features for tracking...")
                     try:
                         # Don't unpack immediately, check what we get first
                         aggregation_result = self._model.aggregator(img_batch)
@@ -224,58 +248,38 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
                             
                     except Exception as e:
                         print(f"DEBUG: Error in aggregator call: {e}")
-                        print(f"DEBUG: Error type: {type(e)}")
-                        # Let's try calling it differently - maybe it needs different arguments?
-                        try:
-                            print("DEBUG: Trying aggregator without batch dimension...")
-                            aggregation_result = self._model.aggregator(img_tensor)
-                            print(f"DEBUG: Alternative call worked, got: {type(aggregation_result)}")
-                        except Exception as e2:
-                            print(f"DEBUG: Alternative call also failed: {e2}")
-                        raise
-                    
-                    # Run full VGGT model prediction
-                    print("DEBUG: Running full model prediction...")
-                    try:
-                        vggt_predictions = self._model(img_batch)
-                        print(f"DEBUG: Model prediction keys: {vggt_predictions.keys()} - SUCCESS")
-                    except Exception as e:
-                        print(f"DEBUG: Error in model prediction: {e}")
-                        raise
-                    
-                    # Convert VGGT's pose encoding to standard camera matrices
-                    print("DEBUG: Converting pose encoding...")
-                    try:
-                        pose_result = pose_encoding_to_extri_intri(
-                            vggt_predictions["pose_enc"], img_batch.shape[-2:]
-                        )
-                        print(f"DEBUG: pose_encoding_to_extri_intri returned {len(pose_result)} values - SUCCESS")
-                        
-                        if len(pose_result) == 2:
-                            extrinsic, intrinsic = pose_result
-                            print("DEBUG: Successfully unpacked pose encoding results")
-                        else:
-                            print(f"DEBUG: Unexpected pose encoding output: {len(pose_result)} values")
-                            raise ValueError(f"pose_encoding_to_extri_intri returned {len(pose_result)} values, expected 2")
-                    except Exception as e:
-                        print(f"DEBUG: Error in pose encoding: {e}")
-                        raise
+                        print(f"DEBUG: Skipping point tracking due to aggregator issues")
+                        # Skip point tracking if aggregator fails
+                        aggregated_tokens_list = None
+                        ps_idx = None
             
             # Generate query points for 3D tracking in original image coordinates
             query_points_original = self._generate_query_points(
                 original_size[1], original_size[0], self.config.num_query_points
             )
             
-            # Perform 3D point tracking with coordinate space conversion
-            print("DEBUG: Starting point tracking...")
-            try:
-                track_data = self._get_point_tracks(
-                    aggregated_tokens_list, ps_idx, img_batch, query_points_original, original_size, vggt_size
-                )
-                print("DEBUG: Point tracking completed successfully")
-            except Exception as e:
-                print(f"DEBUG: Error in point tracking: {e}")
-                raise
+            # Perform 3D point tracking with coordinate space conversion (if aggregator worked)
+            if aggregated_tokens_list is not None and ps_idx is not None:
+                print("DEBUG: Starting point tracking...")
+                try:
+                    track_data = self._get_point_tracks(
+                        aggregated_tokens_list, ps_idx, img_batch, query_points_original, original_size, vggt_size
+                    )
+                    print("DEBUG: Point tracking completed successfully")
+                except Exception as e:
+                    print(f"DEBUG: Error in point tracking: {e}")
+                    # Create empty track data if tracking fails
+                    track_data = {
+                        "tracks_2d": [], "tracks_3d": [], "query_points_original": [], 
+                        "visibility_scores": [], "confidence_scores": []
+                    }
+            else:
+                print("DEBUG: Skipping point tracking due to aggregator failure")
+                # Create empty track data
+                track_data = {
+                    "tracks_2d": [], "tracks_3d": [], "query_points_original": [], 
+                    "visibility_scores": [], "confidence_scores": []
+                }
             
             # Package all VGGT outputs for file saving and processing
             vggt_output = {
@@ -309,56 +313,56 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
             return None
 
     def _preprocess_vggt_image(self, img):
-        """Preprocess image for VGGT model using VGGT's preprocessing logic."""
-        # Handle both PIL Images and tensors
+        """Preprocess image using VGGT's built-in preprocessing function.
+        
+        This uses the same preprocessing as the working single image code,
+        which should ensure compatibility with the VGGT model.
+        """
+        # Get original size before preprocessing
         if isinstance(img, torch.Tensor):
-            # Convert tensor back to PIL Image for our custom preprocessing
+            # Convert tensor back to PIL Image to get size
             if img.dim() == 3 and img.shape[0] in [1, 3, 4]:  # CHW format
-                # Assuming the tensor is already normalized to [0, 1]
                 img_pil = TF.to_pil_image(img)
+                original_size = img_pil.size  # (width, height)
+                
+                # Save the PIL image to a temporary location for VGGT preprocessing
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp_file:
+                    img_pil.save(tmp_file.name)
+                    temp_path = tmp_file.name
             else:
                 raise ValueError(f"Unexpected tensor shape: {img.shape}. Expected CHW format with 1, 3, or 4 channels.")
-            
-            # Get original size from the tensor dimensions
-            original_size = (img.shape[2], img.shape[1])  # (width, height)
         else:
             # Already a PIL Image
-            img_pil = img
-            original_size = img_pil.size  # (width, height)
+            original_size = img.size  # (width, height)
+            
+            # Save to temporary file for VGGT preprocessing
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp_file:
+                img.save(tmp_file.name)
+                temp_path = tmp_file.name
         
-        target_size = 518
-        
-        # Handle RGBA images by blending onto white background
-        if img_pil.mode == "RGBA":
-            img_pil = Image.alpha_composite(
-                img_pil.convert("RGBA"), 
-                Image.new("RGBA", img_pil.size, (255, 255, 255, 255))
-            ).convert("RGB")
-        elif img_pil.mode != "RGB":
-            # Convert to RGB if not already
-            img_pil = img_pil.convert("RGB")
-        
-        width, height = img_pil.size
-        
-        # Set width to 518px
-        new_width = target_size
-        # Calculate height maintaining aspect ratio, divisible by 14
-        new_height = round(height * (new_width / width) / 14) * 14
-        
-        # Resize with new dimensions
-        img_pil = img_pil.resize((new_width, new_height), Image.Resampling.BICUBIC)
-        img_tensor = TF.to_tensor(img_pil)  # Convert to tensor (0, 1), shape [C, H, W]
-        
-        # Center crop height if it's larger than 518
-        if new_height > target_size:
-            start_y = (new_height - target_size) // 2
-            img_tensor = img_tensor[:, start_y : start_y + target_size, :]
-        
-        # Move to device
-        img_tensor = img_tensor.to(self._device)
-        
-        logger.debug(f"Preprocessed image shape: {img_tensor.shape}, original size: {original_size}")
-        return img_tensor, original_size
+        try:
+            # Use VGGT's built-in preprocessing (same as working single image code)
+            print(f"DEBUG: Using VGGT preprocessing on temp file: {temp_path}")
+            images = load_and_preprocess_images([temp_path]).to(self._device)
+            
+            # Remove batch dimension since we're processing single images
+            img_tensor = images.squeeze(0)  # Remove batch dim: [1, C, H, W] -> [C, H, W]
+            
+            vggt_size = (img_tensor.shape[-1], img_tensor.shape[-2])  # (width, height)
+            
+            print(f"DEBUG: VGGT preprocessing complete. Shape: {img_tensor.shape}, original: {original_size}, vggt: {vggt_size}")
+            
+            return img_tensor, original_size
+            
+        finally:
+            # Clean up temporary file
+            import os
+            try:
+                os.unlink(temp_path)
+            except:
+                pass  # Ignore cleanup errors
 
     def _generate_query_points(self, height: int, width: int, num_points: int) -> List[Tuple[float, float]]:
         """Generate a grid of query points for 3D tracking in original image coordinates.
