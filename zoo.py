@@ -167,7 +167,7 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
             keypoints_path = base_dir / f"{base_name}_keypoints.json" # Tracking data
             
             # Preprocess image using VGGT-specific requirements
-            img_tensor, original_size = self._preprocess_vggt_image(img)
+            img_tensor, original_size = self._preprocess_vggt_image(sample)
             vggt_size = (img_tensor.shape[-1], img_tensor.shape[-2])  # (width, height)
             
             # Add batch dimension for model inference
@@ -252,13 +252,16 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
         """Preprocess image using VGGT's built-in preprocessing function."""
         # Use the original file path directly - much more efficient!
         original_path = sample.filepath
-        original_size = Image.open(original_path).size  # Get original size
+        
+        # Get original size efficiently
+        with Image.open(original_path) as img_pil:
+            original_size = img_pil.size  # (width, height)
         
         # Use VGGT's built-in preprocessing directly on original file
-        images = load_and_preprocess_images([original_path], mode="pad").to(self._device)
+        images = load_and_preprocess_images([original_path], mode='pad').to(self._device)
         
         # Remove batch dimension since we're processing single images
-        img_tensor = images.squeeze(0)  # [1, C, H, W] -> [C, H, W]
+        img_tensor = images.squeeze(0)  # Remove batch dim: [1, C, H, W] -> [C, H, W]
         
         vggt_size = (img_tensor.shape[-1], img_tensor.shape[-2])  # (width, height)
         
