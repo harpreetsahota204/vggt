@@ -134,23 +134,13 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
     def predict_all(self, imgs, samples=None):
         """Perform VGGT inference on images (FiftyOne processes one at a time).
         
-        Note: Despite the name 'predict_all', FiftyOne actually calls this method
-        with single images, not batches.
-
         Args:
             imgs: Single image tensor from FiftyOne preprocessing
             samples: Single sample object containing filepath and metadata
                 
         Returns:
-            Single prediction dict containing:
-                - depth_map_path: Path to saved depth PNG for heatmap display
-                - vggt_output: Complete VGGT inference results
+            Single prediction dict for the output processor
         """
-        # DEBUG: Check what we're actually receiving
-        print(f"DEBUG: predict_all called with:")
-        print(f"DEBUG: imgs type: {type(imgs)}")
-        print(f"DEBUG: samples type: {type(samples)}")
-        
         if samples is None:
             raise ValueError("VGGT model requires sample objects to access filepaths")
         
@@ -165,10 +155,6 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
         else:
             sample = samples
         
-        print(f"DEBUG: Extracted image type: {type(img)}")
-        print(f"DEBUG: Extracted sample type: {type(sample)}")
-        print(f"DEBUG: Sample has filepath: {hasattr(sample, 'filepath')}")
-        
         try:
             # Extract file path information for saving auxiliary outputs
             original_path = Path(sample.filepath)
@@ -176,7 +162,6 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
             base_name = original_path.stem
             
             # Define output paths for all auxiliary files
-            # These will be co-located with the original image
             depth_png_path = base_dir / f"{base_name}_depth.png"      # Colorized depth for heatmap
             fo3d_path = base_dir / f"{base_name}.fo3d"                # 3D point cloud
             keypoints_path = base_dir / f"{base_name}_keypoints.json" # Tracking data
@@ -191,91 +176,43 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
             # Run VGGT inference with automatic mixed precision
             with torch.no_grad():
                 with torch.amp.autocast('cuda', dtype=self.dtype):
-                    # Try full model prediction first (like your working single image code)
-                    print("DEBUG: Running full model prediction...")
-                    try:
-                        vggt_predictions = self._model(img_batch)
-                        print(f"DEBUG: Model prediction keys: {vggt_predictions.keys()} - SUCCESS")
-                        
-                        # Convert VGGT's pose encoding to standard camera matrices
-                        print("DEBUG: Converting pose encoding...")
-                        pose_result = pose_encoding_to_extri_intri(
-                            vggt_predictions["pose_enc"], img_batch.shape[-2:]
-                        )
-                        print(f"DEBUG: pose_encoding_to_extri_intri returned {len(pose_result)} values - SUCCESS")
-                        
-                        if len(pose_result) == 2:
-                            extrinsic, intrinsic = pose_result
-                            print("DEBUG: Successfully unpacked pose encoding results")
-                        else:
-                            print(f"DEBUG: Unexpected pose encoding output: {len(pose_result)} values")
-                            raise ValueError(f"pose_encoding_to_extri_intri returned {len(pose_result)} values, expected 2")
-                            
-                    except Exception as e:
-                        print(f"DEBUG: Error in full model prediction: {e}")
-                        raise
+                    # Run full VGGT model prediction
+                    vggt_predictions = self._model(img_batch)
                     
-                    # Now try to get aggregated features for tracking (if needed)
-                    print("DEBUG: Getting aggregated features for tracking...")
+                    # Convert VGGT's pose encoding to standard camera matrices
+                    extrinsic, intrinsic = pose_encoding_to_extri_intri(
+                        vggt_predictions["pose_enc"], img_batch.shape[-2:]
+                    )
+                    
+                    # Try to get aggregated features for tracking (optional)
                     try:
-                        # Don't unpack immediately, check what we get first
-                        aggregation_result = self._model.aggregator(img_batch)
-                        print(f"DEBUG: Aggregator returned type: {type(aggregation_result)}")
-                        
-                        if isinstance(aggregation_result, (list, tuple)):
-                            print(f"DEBUG: Aggregator returned {len(aggregation_result)} values")
-                            print(f"DEBUG: Types: {[type(x) for x in aggregation_result]}")
-                            
-                            # Handle different return patterns
-                            if len(aggregation_result) == 2:
-                                aggregated_tokens_list, ps_idx = aggregation_result
-                                print("DEBUG: Successfully unpacked 2 values from aggregator")
-                            elif len(aggregation_result) == 4:
-                                # Maybe it returns 4 values instead of 2?
-                                aggregated_tokens_list, ps_idx, extra1, extra2 = aggregation_result
-                                print(f"DEBUG: Got 4 values from aggregator, extras: {type(extra1)}, {type(extra2)}")
-                            elif len(aggregation_result) == 5:
-                                # Maybe it returns 5 values?
-                                aggregated_tokens_list, ps_idx, extra1, extra2, extra3 = aggregation_result
-                                print(f"DEBUG: Got 5 values from aggregator")
-                            else:
-                                raise ValueError(f"Unexpected aggregator output: {len(aggregation_result)} values")
-                        else:
-                            print(f"DEBUG: Aggregator returned single value of type: {type(aggregation_result)}")
-                            # Handle case where it returns a single object
-                            aggregated_tokens_list = aggregation_result
-                            ps_idx = None
-                            
-                    except Exception as e:
-                        print(f"DEBUG: Error in aggregator call: {e}")
-                        print(f"DEBUG: Skipping point tracking due to aggregator issues")
+                        aggregated_tokens_list, ps_idx = self._model.aggregator(img_batch)
+                        aggregator_success = True
+                    except Exception:
                         # Skip point tracking if aggregator fails
                         aggregated_tokens_list = None
                         ps_idx = None
+                        aggregator_success = False
             
             # Generate query points for 3D tracking in original image coordinates
             query_points_original = self._generate_query_points(
                 original_size[1], original_size[0], self.config.num_query_points
             )
             
-            # Perform 3D point tracking with coordinate space conversion (if aggregator worked)
-            if aggregated_tokens_list is not None and ps_idx is not None:
-                print("DEBUG: Starting point tracking...")
+            # Perform 3D point tracking if aggregator worked
+            if aggregator_success:
                 try:
                     track_data = self._get_point_tracks(
                         aggregated_tokens_list, ps_idx, img_batch, query_points_original, original_size, vggt_size
                     )
-                    print("DEBUG: Point tracking completed successfully")
-                except Exception as e:
-                    print(f"DEBUG: Error in point tracking: {e}")
+                except Exception:
                     # Create empty track data if tracking fails
                     track_data = {
                         "tracks_2d": [], "tracks_3d": [], "query_points_original": [], 
                         "visibility_scores": [], "confidence_scores": []
                     }
             else:
-                print("DEBUG: Skipping point tracking due to aggregator failure")
-                # Create empty track data
+                # Create empty track data if aggregator failed
                 track_data = {
                     "tracks_2d": [], "tracks_3d": [], "query_points_original": [], 
                     "visibility_scores": [], "confidence_scores": []
@@ -309,15 +246,10 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
             
         except Exception as e:
             logger.error(f"Error processing sample {sample.filepath}: {e}")
-            # Return None for failed predictions
             return None
 
     def _preprocess_vggt_image(self, img):
-        """Preprocess image using VGGT's built-in preprocessing function.
-        
-        This uses the same preprocessing as the working single image code,
-        which should ensure compatibility with the VGGT model.
-        """
+        """Preprocess image using VGGT's built-in preprocessing function."""
         # Get original size before preprocessing
         if isinstance(img, torch.Tensor):
             # Convert tensor back to PIL Image to get size
@@ -344,15 +276,12 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
         
         try:
             # Use VGGT's built-in preprocessing (same as working single image code)
-            print(f"DEBUG: Using VGGT preprocessing on temp file: {temp_path}")
             images = load_and_preprocess_images([temp_path]).to(self._device)
             
             # Remove batch dimension since we're processing single images
             img_tensor = images.squeeze(0)  # Remove batch dim: [1, C, H, W] -> [C, H, W]
             
             vggt_size = (img_tensor.shape[-1], img_tensor.shape[-2])  # (width, height)
-            
-            print(f"DEBUG: VGGT preprocessing complete. Shape: {img_tensor.shape}, original: {original_size}, vggt: {vggt_size}")
             
             return img_tensor, original_size
             
@@ -583,7 +512,7 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
             logger.error(f"Error saving depth PNG to {output_path}: {e}")
 
     def _save_fo3d(self, vggt_output: Dict, output_path: Path):
-        """Save 3D point cloud in FiftyOne's fo3d format for 3D visualization.
+        """Save 3D point cloud in both PCD and FiftyOne's fo3d formats.
         
         Converts VGGT's depth map and camera parameters into a colored 3D point
         cloud suitable for visualization in FiftyOne's 3D viewer. Points are
@@ -594,12 +523,12 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
         2. Extract corresponding colors from the input image
         3. Apply confidence-based filtering to remove unreliable points
         4. Create Open3D point cloud with colors
-        5. Convert to FiftyOne's fo3d format
+        5. Save as both PCD and fo3d formats
         
         Args:
             vggt_output (Dict): Complete VGGT inference results including depth,
                 camera parameters, and confidence maps
-            output_path (Path): Destination path for fo3d file
+            output_path (Path): Destination path for fo3d file (PCD will use same base name)
         """
         try:
             # Convert depth map to 3D world coordinates using camera geometry
@@ -629,24 +558,24 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
             pcd.points = o3d.utility.Vector3dVector(points[mask].astype(np.float32))
             pcd.colors = o3d.utility.Vector3dVector(colors_flat[mask].astype(np.float32) / 255.0)
             
-            # Save temporary PCD file (required by FiftyOne's fo3d converter)
-            temp_pcd_path = output_path.with_suffix('.pcd')
-            o3d.io.write_point_cloud(str(temp_pcd_path), pcd, write_ascii=False)
+            # Generate PCD path using the same base name as fo3d
+            pcd_path = output_path.with_suffix('.pcd')
+            
+            # Save PCD file directly
+            o3d.io.write_point_cloud(str(pcd_path), pcd, write_ascii=False)
+            logger.debug(f"Saved PCD file with {np.sum(mask):,} points to {pcd_path}")
             
             # Convert to FiftyOne's fo3d format for 3D visualization
             scene = fo.Scene()
             scene.camera = fo.PerspectiveCamera(up="Z")  # Set camera orientation
-            mesh = fo.PointCloud("pointcloud", str(temp_pcd_path))
+            mesh = fo.PointCloud("pointcloud", str(pcd_path))  # Reference the saved PCD
             scene.add(mesh)
             scene.write(str(output_path))
             
-            # Clean up temporary PCD file
-            temp_pcd_path.unlink()
-            
-            logger.debug(f"Saved fo3d file with {np.sum(mask):,} points to {output_path}")
+            logger.debug(f"Saved fo3d file to {output_path}")
             
         except Exception as e:
-            logger.error(f"Error saving fo3d file to {output_path}: {e}")
+            logger.error(f"Error saving 3D files to {output_path}: {e}")
 
     def _save_keypoints(self, vggt_output: Dict, output_path: Path):
         """Save complete tracking and 3D reconstruction data as JSON.
