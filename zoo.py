@@ -1,9 +1,9 @@
+import os
 import logging
 import numpy as np
 import torch
 import cv2
 import json
-import warnings
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 import torchvision.transforms.functional as TF
@@ -11,9 +11,6 @@ import torchvision
 import open3d as o3d
 from PIL import Image
 from skimage.transform import resize
-
-# Suppress deprecation warning from VGGT library
-warnings.filterwarnings("ignore", message=".*torch.cuda.amp.autocast.*is deprecated.*", category=FutureWarning)
 
 from vggt.models.vggt import VGGT
 from vggt.utils.load_fn import load_and_preprocess_images
