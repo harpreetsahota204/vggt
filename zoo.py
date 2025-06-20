@@ -219,7 +219,7 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
             original_size = img_pil.size  # (width, height)
         
         # Use VGGT's built-in preprocessing directly on original file
-        images = load_and_preprocess_images([original_path]).to(self._device)
+        images = load_and_preprocess_images([original_path], mode="pad").to(self._device)
         
         # Remove batch dimension since we're processing single images
         img_tensor = images.squeeze(0)  # Remove batch dim: [1, C, H, W] -> [C, H, W]
