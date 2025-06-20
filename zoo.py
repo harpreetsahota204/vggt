@@ -40,9 +40,6 @@ class VGGTModelConfig(fout.TorchImageModelConfig):
         confidence_threshold (float): Percentile threshold (0-100) for filtering
             point cloud points based on depth confidence. Higher values result in
             fewer but more reliable points. Default is 51.0.
-        num_query_points (int): Number of 2D points to automatically generate
-            for 3D tracking. These points are distributed in a grid pattern
-            across the image. Default is 1551.
     """
 
     def __init__(self, d):
@@ -50,7 +47,6 @@ class VGGTModelConfig(fout.TorchImageModelConfig):
         self.model_name = self.parse_string(d, "model_name", default="facebook/VGGT-1B")
         self.model_path = self.parse_string(d, "model_path")
         self.confidence_threshold = self.parse_number(d, "confidence_threshold", default=51.0)
-        self.num_query_points = self.parse_int(d, "num_query_points", default=1551)
 
 
 class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
@@ -183,40 +179,6 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
                     extrinsic, intrinsic = pose_encoding_to_extri_intri(
                         vggt_predictions["pose_enc"], img_batch.shape[-2:]
                     )
-                    
-                    # Try to get aggregated features for tracking (optional)
-                    try:
-                        aggregated_tokens_list, ps_idx = self._model.aggregator(img_batch)
-                        aggregator_success = True
-                    except Exception:
-                        # Skip point tracking if aggregator fails
-                        aggregated_tokens_list = None
-                        ps_idx = None
-                        aggregator_success = False
-            
-            # Generate query points for 3D tracking in original image coordinates
-            query_points_original = self._generate_query_points(
-                original_size[1], original_size[0], self.config.num_query_points
-            )
-            
-            # Perform 3D point tracking if aggregator worked
-            if aggregator_success:
-                try:
-                    track_data = self._get_point_tracks(
-                        aggregated_tokens_list, ps_idx, img_batch, query_points_original, original_size, vggt_size
-                    )
-                except Exception:
-                    # Create empty track data if tracking fails
-                    track_data = {
-                        "tracks_2d": [], "tracks_3d": [], "query_points_original": [], 
-                        "visibility_scores": [], "confidence_scores": []
-                    }
-            else:
-                # Create empty track data if aggregator failed
-                track_data = {
-                    "tracks_2d": [], "tracks_3d": [], "query_points_original": [], 
-                    "visibility_scores": [], "confidence_scores": []
-                }
             
             # Package all VGGT outputs for file saving and processing
             vggt_output = {
@@ -226,15 +188,14 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
                 "extrinsic": extrinsic.cpu().numpy().squeeze(0),
                 "intrinsic": intrinsic.cpu().numpy().squeeze(0),
                 "images": img_tensor.cpu().numpy(),
-                "point_tracks": track_data,
                 "original_size": original_size,
                 "vggt_size": vggt_size,
             }
             
-            # Save all auxiliary files for post-processing
+            # Save auxiliary files for post-processing
             self._save_depth_png(vggt_output, depth_png_path)
             self._save_fo3d(vggt_output, fo3d_path)
-            self._save_keypoints(vggt_output, keypoints_path)
+            # Note: Removed keypoints saving since point tracking is disabled
             
             # Package prediction data for output processor
             prediction_data = {
@@ -258,7 +219,7 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
             original_size = img_pil.size  # (width, height)
         
         # Use VGGT's built-in preprocessing directly on original file
-        images = load_and_preprocess_images([original_path], mode='pad').to(self._device)
+        images = load_and_preprocess_images([original_path]).to(self._device)
         
         # Remove batch dimension since we're processing single images
         img_tensor = images.squeeze(0)  # Remove batch dim: [1, C, H, W] -> [C, H, W]
@@ -545,64 +506,6 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
             
         except Exception as e:
             logger.error(f"Error saving 3D files to {output_path}: {e}")
-
-    def _save_keypoints(self, vggt_output: Dict, output_path: Path):
-        """Save complete tracking and 3D reconstruction data as JSON.
-        
-        Serializes all the tracking results, 3D coordinates, and camera parameters
-        to a JSON file for post-processing. This includes both pixel and normalized
-        coordinates for maximum flexibility in downstream applications.
-        
-        Saved data includes:
-        - 2D tracking points in both pixel and normalized [0,1] coordinates
-        - 3D world coordinates for each tracked point
-        - Visibility and confidence scores per point
-        - Camera intrinsic and extrinsic parameters
-        - Image size information for coordinate conversion
-        
-        Args:
-            vggt_output (Dict): Complete VGGT inference results
-            output_path (Path): Destination path for JSON file
-        """
-        try:
-            # Extract tracking data from VGGT output
-            track_data = vggt_output["point_tracks"]
-            
-            # Convert pixel coordinates to normalized [0, 1] coordinates
-            # This format is required by many FiftyOne label types
-            orig_w, orig_h = vggt_output["original_size"]
-            normalized_points = []
-            for x, y in track_data["tracks_2d"]:
-                normalized_points.append([x / orig_w, y / orig_h])
-            
-            # Package all tracking and reconstruction data
-            keypoint_data = {
-                # 2D tracking points in different coordinate systems
-                "points_2d_normalized": normalized_points,           # [0, 1] range for FiftyOne
-                "points_2d_pixel": track_data["tracks_2d"],         # Pixel coordinates
-                
-                # 3D tracking and confidence data
-                "tracks_3d": track_data["tracks_3d"],               # World coordinates
-                "visibility_scores": track_data["visibility_scores"], # Per-point visibility
-                "confidence_scores": track_data["confidence_scores"], # Per-point confidence
-                
-                # Image and preprocessing metadata
-                "original_size": vggt_output["original_size"],       # Original image dimensions
-                "vggt_size": vggt_output["vggt_size"],              # Preprocessed dimensions
-                
-                # Camera parameters for 3D reconstruction
-                "camera_extrinsic": vggt_output["extrinsic"].tolist(),  # 4x4 pose matrix
-                "camera_intrinsic": vggt_output["intrinsic"].tolist(),  # 3x3 calibration matrix
-            }
-            
-            # Save as formatted JSON for human readability
-            with open(output_path, 'w') as f:
-                json.dump(keypoint_data, f, indent=2)
-            
-            logger.debug(f"Saved {len(normalized_points)} keypoints to {output_path}")
-            
-        except Exception as e:
-            logger.error(f"Error saving keypoints to {output_path}: {e}")
 
 
 class VGGTOutputProcessor(fout.OutputProcessor):

@@ -6,7 +6,6 @@ from fiftyone.operators import types
 
 from vggt.models.vggt import VGGT
 
-
 from .zoo import VGGTModelConfig, VGGTModel, VGGTOutputProcessor
 
 logger = logging.getLogger(__name__)
@@ -75,7 +74,6 @@ def load_model(
         "model_name": model_name,
         "model_path": model_path,
         "confidence_threshold": confidence_threshold,
-        "num_query_points": num_query_points,
         **kwargs
     }
     
@@ -113,11 +111,5 @@ def resolve_input(model_name, ctx):
         description="Confidence threshold percentile for point cloud filtering (0-100)"
     )
     
-    inputs.int(
-        "num_query_points",
-        default=5000,
-        label="Number of Query Points",
-        description="Number of points to automatically select for tracking"
-    )
     
     return types.Property(inputs)
