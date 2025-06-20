@@ -47,6 +47,7 @@ class VGGTModelConfig(fout.TorchImageModelConfig):
         self.model_name = self.parse_string(d, "model_name", default="facebook/VGGT-1B")
         self.model_path = self.parse_string(d, "model_path")
         self.confidence_threshold = self.parse_number(d, "confidence_threshold", default=51.0)
+        self.mode = self.parse_number(d, "mode", default="pad")
 
 
 class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
@@ -216,7 +217,7 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
             original_size = img_pil.size  # (width, height)
         
         # Use VGGT's built-in preprocessing directly on original file
-        images = load_and_preprocess_images([original_path], mode="pad").to(self._device)
+        images = load_and_preprocess_images([original_path], mode=self.config.mode).to(self._device)
         
         # Remove batch dimension since we're processing single images
         img_tensor = images.squeeze(0)  # Remove batch dim: [1, C, H, W] -> [C, H, W]

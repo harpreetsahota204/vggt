@@ -49,7 +49,7 @@ def load_model(
     model_name, 
     model_path, 
     confidence_threshold=51.0,
-    num_query_points=5000,
+    mode="pad",
     **kwargs
 ):
     """Loads the VGGT model.
@@ -74,6 +74,7 @@ def load_model(
         "model_name": model_name,
         "model_path": model_path,
         "confidence_threshold": confidence_threshold,
+        "mode": mode,
         **kwargs
     }
     
