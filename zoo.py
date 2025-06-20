@@ -1,9 +1,9 @@
-import os
 import logging
 import numpy as np
 import torch
 import cv2
 import json
+import warnings
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 import torchvision.transforms.functional as TF
@@ -11,6 +11,9 @@ import torchvision
 import open3d as o3d
 from PIL import Image
 from skimage.transform import resize
+
+# Suppress deprecation warning from VGGT library
+warnings.filterwarnings("ignore", message=".*torch.cuda.amp.autocast.*is deprecated.*", category=FutureWarning)
 
 from vggt.models.vggt import VGGT
 from vggt.utils.load_fn import load_and_preprocess_images
@@ -57,14 +60,13 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
     produces:
     
     1. Dense depth maps with confidence scores
-    2. 3D point tracking for automatically generated query points
-    3. Camera pose estimation (extrinsic and intrinsic parameters)
-    4. Dense 3D point clouds from depth map unprojection
+    2. Camera pose estimation (extrinsic and intrinsic parameters)
+    3. Dense 3D point clouds from depth map unprojection
     
     The model outputs are saved as:
     - Depth map PNG: Colorized depth visualization for FiftyOne heatmap display
+    - PCD file: Dense 3D point cloud in standard format
     - fo3d file: 3D point cloud for FiftyOne 3D visualization
-    - Keypoints JSON: Complete tracking data with 2D/3D correspondences
     
     The primary FiftyOne output is a Heatmap label pointing to the depth PNG,
     while auxiliary files are co-located with the original images for post-processing.
@@ -194,7 +196,6 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
             # Save auxiliary files for post-processing
             self._save_depth_png(vggt_output, depth_png_path)
             self._save_fo3d(vggt_output, fo3d_path)
-            # Note: Removed keypoints saving since point tracking is disabled
             
             # Package prediction data for output processor
             prediction_data = {
@@ -218,7 +219,7 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
             original_size = img_pil.size  # (width, height)
         
         # Use VGGT's built-in preprocessing directly on original file
-        images = load_and_preprocess_images([original_path], mode="pad").to(self._device)
+        images = load_and_preprocess_images([original_path]).to(self._device)
         
         # Remove batch dimension since we're processing single images
         img_tensor = images.squeeze(0)  # Remove batch dim: [1, C, H, W] -> [C, H, W]
@@ -226,156 +227,6 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
         vggt_size = (img_tensor.shape[-1], img_tensor.shape[-2])  # (width, height)
         
         return img_tensor, original_size
-
-    def _generate_query_points(self, height: int, width: int, num_points: int) -> List[Tuple[float, float]]:
-        """Generate a grid of query points for 3D tracking in original image coordinates.
-        
-        Creates a roughly uniform distribution of points across the image for tracking,
-        avoiding edges where tracking might be unreliable. Points are arranged in a
-        grid pattern with small random offsets for natural distribution.
-        
-        Args:
-            height (int): Image height in pixels
-            width (int): Image width in pixels  
-            num_points (int): Target number of points to generate
-            
-        Returns:
-            List[Tuple[float, float]]: Query points as (x, y) coordinates in pixels
-        """
-        # Define safety margin to avoid edge artifacts
-        margin = 50  # pixels from image edges
-        
-        # Calculate grid dimensions to approximate target point count
-        # Maintain aspect ratio in point distribution
-        h_points = int(np.sqrt(num_points * height / width))
-        w_points = int(num_points / h_points)
-        
-        query_points = []
-        
-        # Generate grid points with random jitter
-        for i in range(h_points):
-            for j in range(w_points):
-                # Calculate base grid position (center of grid cell)
-                y = margin + (height - 2 * margin) * (i + 0.5) / h_points
-                x = margin + (width - 2 * margin) * (j + 0.5) / w_points
-                
-                # Add small random offset to avoid perfect grid alignment
-                y += np.random.uniform(-20, 20)
-                x += np.random.uniform(-20, 20)
-                
-                # Ensure points stay within image bounds (with margin)
-                y = np.clip(y, margin, height - margin)
-                x = np.clip(x, margin, width - margin)
-                
-                query_points.append((float(x), float(y)))
-        
-        # Return exact number of requested points
-        return query_points[:num_points]
-
-    def _get_point_tracks(self, aggregated_tokens_list, ps_idx, images: torch.Tensor, 
-                         query_points_original: List[Tuple[float, float]], 
-                         original_size: Tuple[int, int], vggt_size: Tuple[int, int]) -> Dict:
-        """Perform 3D point tracking with coordinate space conversion.
-        
-        This method handles the complex coordinate transformations required for VGGT
-        tracking. Query points are specified in original image coordinates but must
-        be converted to VGGT's preprocessed coordinate space for inference.
-        
-        The tracking process:
-        1. Convert 2D query points from original to VGGT coordinate space
-        2. Run VGGT's tracking pipeline using pre-computed aggregated features
-        3. Return 2D tracks in original coordinates and 3D tracks in world space
-        
-        Args:
-            aggregated_tokens_list: Pre-computed aggregated features from VGGT aggregator
-            ps_idx: Patch indices from VGGT aggregator
-            images (torch.Tensor): Preprocessed image batch [N, C, H, W] 
-            query_points_original (List[Tuple[float, float]]): Query points in original
-                image pixel coordinates
-            original_size (Tuple[int, int]): Original image (width, height)
-            vggt_size (Tuple[int, int]): VGGT preprocessed image (width, height)
-            
-        Returns:
-            Dict: Tracking results containing:
-                - tracks_2d: 2D points in original coordinates
-                - tracks_3d: 3D points in world coordinates  
-                - visibility_scores: Per-point visibility confidence
-                - confidence_scores: Per-point tracking confidence
-        """
-        # Handle empty query points case
-        if not query_points_original:
-            return {"tracks_2d": [], "tracks_3d": [], "query_points_original": [], 
-                   "visibility_scores": [], "confidence_scores": []}
-        
-        # Ensure all tensors are on the same device to avoid CUDA errors
-        images = images.to(self._device)
-        
-        # Convert query points from original image space to VGGT preprocessing space
-        orig_w, orig_h = original_size
-        vggt_w, vggt_h = vggt_size
-        
-        query_points_vggt = []
-        for x_orig, y_orig in query_points_original:
-            # Apply the same scaling transformation used in preprocessing
-            x_vggt = x_orig * vggt_w / orig_w
-            y_vggt = y_orig * vggt_h / orig_h
-            query_points_vggt.append((x_vggt, y_vggt))
-        
-        # Convert query points to tensor format for VGGT
-        query_points_tensor = torch.FloatTensor(query_points_vggt).to(self._device)
-        query_points_tensor = query_points_tensor[None]  # Add batch dimension [1, N, 2]
-        
-        # Run VGGT's tracking pipeline using pre-computed features
-        with torch.no_grad():
-            with torch.amp.autocast('cuda', dtype=self.dtype):
-                # Debug: Check what track_head actually returns
-                print("DEBUG: Calling track_head...")
-                tracking_output = self._model.track_head(
-                    aggregated_tokens_list, images, ps_idx, 
-                    query_points=query_points_tensor
-                )
-                
-                # Print debug information
-                print(f"DEBUG: track_head returned {len(tracking_output)} values")
-                print(f"DEBUG: Types: {[type(x) for x in tracking_output]}")
-                
-                # Handle different return value counts
-                if len(tracking_output) == 3:
-                    track_list, vis_score, conf_score = tracking_output
-                    print("DEBUG: Successfully unpacked 3 values from track_head")
-                elif len(tracking_output) == 4:
-                    track_list, vis_score, conf_score, extra = tracking_output
-                    print(f"DEBUG: Got 4 values, extra type: {type(extra)}")
-                elif len(tracking_output) == 5:
-                    track_list, vis_score, conf_score, extra1, extra2 = tracking_output
-                    print(f"DEBUG: Got 5 values, extra types: {type(extra1)}, {type(extra2)}")
-                else:
-                    raise ValueError(f"Unexpected number of return values from track_head: {len(tracking_output)}")
-        
-        
-        def _convert_to_list(data):
-            """Convert various tensor formats to Python lists for serialization."""
-            if isinstance(data, torch.Tensor):
-                # Handle mixed precision by converting to float32 first
-                return data.cpu().float().numpy().squeeze(0).tolist()
-            elif isinstance(data, list):
-                return data
-            elif isinstance(data, np.ndarray):
-                return data.squeeze(0).tolist() if data.ndim > 1 else data.tolist()
-            else:
-                return data
-        
-        # Convert tracking outputs to serializable format
-        tracks_3d = _convert_to_list(track_list)
-        
-        return {
-            "tracks_2d": query_points_original,                    # 2D in original coordinates
-            "tracks_3d": tracks_3d,                               # 3D in world coordinates
-            "query_points_original": query_points_original,       # For reference
-            "query_points_vggt": query_points_vggt,              # For debugging
-            "visibility_scores": _convert_to_list(vis_score),     # Per-point visibility
-            "confidence_scores": _convert_to_list(conf_score),    # Per-point confidence
-        }
 
     def _save_depth_png(self, vggt_output: Dict, output_path: Path):
         """Save depth map as a colorized PNG at VGGT's native resolution.
@@ -514,7 +365,7 @@ class VGGTOutputProcessor(fout.OutputProcessor):
     The primary output is a Heatmap label that references the saved depth PNG file,
     allowing users to visualize depth information directly in the FiftyOne App.
     
-    While VGGT produces multiple types of valuable data (3D points, tracking, camera
+    While VGGT produces multiple types of valuable data (3D points, camera
     parameters), FiftyOne's apply_model() accepts only a single label_field. This
     processor focuses on the depth map as the primary visualization, with all other
     data saved as auxiliary files for post-processing.
@@ -522,7 +373,7 @@ class VGGTOutputProcessor(fout.OutputProcessor):
     Design rationale:
     - Depth maps provide immediate visual value in FiftyOne's interface
     - Heatmap labels integrate seamlessly with FiftyOne's visualization tools  
-    - Auxiliary files (fo3d, keypoints) enable advanced 3D workflows
+    - Auxiliary files (fo3d, PCD) enable advanced 3D workflows
     - Co-location with original images simplifies data management
     
     Args:
