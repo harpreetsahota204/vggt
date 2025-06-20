@@ -289,130 +289,19 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
         except Exception as e:
             logger.error(f"Error saving depth PNG to {output_path}: {e}")
 
-    def _extract_camera_parameters(self, vggt_output):
-        """Extract camera position, rotation, and other parameters from VGGT output."""
-        extrinsic = np.squeeze(vggt_output["extrinsic"])
-        intrinsic = np.squeeze(vggt_output["intrinsic"])
-        
-        # Handle different extrinsic matrix shapes
-        if extrinsic.shape == (3, 4):
-            R = extrinsic[:3, :3]  # Rotation matrix (world-to-camera)
-            t = extrinsic[:, 3]    # Translation vector
-        elif extrinsic.shape == (4, 4):
-            R = extrinsic[:3, :3]
-            t = extrinsic[:3, 3]
-        else:
-            # Fallback - no camera positioning
-            return None
-        
-        # Camera position in world coordinates (for world-to-camera transform)
-        camera_position = -R.T @ t
-        
-        # Camera orientation vectors in world coordinates
-        R_cam_to_world = R.T
-        camera_forward = R_cam_to_world @ np.array([0, 0, 1])  # Camera Z-axis (forward)
-        camera_up = R_cam_to_world @ np.array([0, -1, 0])     # Camera -Y-axis (up in OpenCV)
-        
-        return {
-            "position": camera_position.tolist(),
-            "forward": camera_forward.tolist(),
-            "up": camera_up.tolist(),
-            "rotation_matrix": R_cam_to_world.tolist()
-        }
-
-    def _determine_camera_up_direction(self, extrinsic_matrix):
-        """Determine the best up direction for FiftyOne's 3D viewer based on camera pose."""
-        
-        # Handle different extrinsic matrix shapes
-        extrinsic = np.squeeze(extrinsic_matrix)
-        
-        if extrinsic.shape == (3, 4):
-            R = extrinsic[:3, :3]  # Rotation matrix (world-to-camera)
-        elif extrinsic.shape == (4, 4):
-            R = extrinsic[:3, :3]
-        elif extrinsic.shape == (3, 3):
-            R = extrinsic  # Already just rotation
-        else:
-            # Fallback to default
-            return "Y"
-        
-        # Camera-to-world rotation matrix  
-        R_cam_to_world = R.T
-        
-        # Assume world Y-axis points up (standard gravity direction)
-        world_up = np.array([0, 1, 0])
-        
-        # Find which camera axis best aligns with world up (FiftyOne only supports X, Y, Z)
-        camera_axes = {
-            "X": np.array([1, 0, 0]),
-            "Y": np.array([0, 1, 0]),
-            "Z": np.array([0, 0, 1])
-        }
-        
-        # Transform world up to camera coordinates
-        world_to_cam_R = R_cam_to_world.T
-        world_up_in_cam = world_to_cam_R @ world_up
-        
-        best_alignment = -1
-        best_axis = "Y"  # Default fallback
-        
-        for axis_name, axis_vec in camera_axes.items():
-            # Check both positive and negative alignment, but only return positive axes
-            alignment = abs(np.dot(world_up_in_cam, axis_vec))
-            if alignment > best_alignment:
-                best_alignment = alignment
-                best_axis = axis_name
-        
-        return best_axis
-
-    def _determine_scene_camera_setup(self, vggt_output):
-        """Determine camera position, look_at point, and up direction for the scene."""
-        
-        # Extract camera parameters
-        camera_params = self._extract_camera_parameters(vggt_output)
-        
-        if camera_params is None:
-            # Fallback to just up direction
-            up_direction = self._determine_camera_up_direction(vggt_output["extrinsic"])
-            return {"up": up_direction, "position": None, "look_at": None}
-        
-        # Determine up direction
-        up_direction = self._determine_camera_up_direction(vggt_output["extrinsic"])
-        
-        # Camera position and forward direction
-        camera_position = camera_params["position"]
-        camera_forward = camera_params["forward"]
-        
-        # Calculate where the camera is looking (position + forward direction)
-        # Use a reasonable distance for the look_at point
-        look_distance = 5.0  # Look 5 units ahead in the forward direction
-        look_at_point = [
-            camera_position[0] + camera_forward[0] * look_distance,
-            camera_position[1] + camera_forward[1] * look_distance,
-            camera_position[2] + camera_forward[2] * look_distance
-        ]
-        
-        return {
-            "up": up_direction,
-            "position": camera_position,     # Where the camera is located
-            "look_at": look_at_point,        # Where the camera is looking
-            "camera_params": camera_params
-        }
-
     def _save_fo3d(self, vggt_output: Dict, output_path: Path):
-        """Save 3D point cloud with VGGT camera positioning.
+        """Save 3D point cloud in both PCD and FiftyOne's fo3d formats.
         
         Converts VGGT's depth map and camera parameters into a colored 3D point
-        cloud suitable for visualization in FiftyOne's 3D viewer. The scene camera
-        is positioned at the actual VGGT camera location for authentic viewpoint.
+        cloud suitable for visualization in FiftyOne's 3D viewer. Points are
+        filtered by confidence to remove noisy regions.
         
         Processing pipeline:
         1. Unproject depth map to 3D world coordinates using camera parameters
         2. Extract corresponding colors from the input image
         3. Apply confidence-based filtering to remove unreliable points
         4. Create Open3D point cloud with colors
-        5. Position FiftyOne scene camera at VGGT camera location
-        6. Save as both PCD and fo3d formats
+        5. Save as both PCD and fo3d formats
         
         Args:
             vggt_output (Dict): Complete VGGT inference results including depth,
@@ -454,45 +343,14 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
             o3d.io.write_point_cloud(str(pcd_path), pcd, write_ascii=False)
             logger.debug(f"Saved PCD file with {np.sum(mask):,} points to {pcd_path}")
             
-            # Get camera setup using VGGT camera information
-            camera_setup = self._determine_scene_camera_setup(vggt_output)
-            
             # Convert to FiftyOne's fo3d format for 3D visualization
             scene = fo.Scene()
-            
-            # Set up camera with VGGT camera position and orientation
-            if camera_setup["position"] is not None:
-                from fiftyone.core.threed.transformation import Vector3
-                
-                position_vec = Vector3(
-                    x=float(camera_setup["position"][0]),
-                    y=float(camera_setup["position"][1]), 
-                    z=float(camera_setup["position"][2])
-                )
-                look_at_vec = Vector3(
-                    x=float(camera_setup["look_at"][0]),
-                    y=float(camera_setup["look_at"][1]),
-                    z=float(camera_setup["look_at"][2])
-                )
-                
-                scene.camera = fo.PerspectiveCamera(
-                    position=position_vec,        # Where the camera is located
-                    look_at=look_at_vec,          # Where the camera is looking
-                    up=camera_setup["up"],        # Up direction based on camera pose
-                    fov=50.0                      # Default field of view
-                )
-                logger.debug(f"Positioned camera at {camera_setup['position']} looking at {camera_setup['look_at']} with up={camera_setup['up']}")
-            else:
-                # Fallback to just up direction
-                scene.camera = fo.PerspectiveCamera(up=camera_setup["up"])
-                logger.debug(f"Set camera up direction to {camera_setup['up']}")
-            
-            # Add point cloud to scene
-            mesh = fo.PointCloud("pointcloud", str(pcd_path.name))  # Use relative path
+            scene.camera = fo.PerspectiveCamera(up="Z")  # Set camera orientation
+            mesh = fo.PointCloud("pointcloud", str(pcd_path))  # Reference the saved PCD
             scene.add(mesh)
             scene.write(str(output_path))
             
-            logger.debug(f"Saved fo3d file with VGGT camera positioning to {output_path}")
+            logger.debug(f"Saved fo3d file to {output_path}")
             
         except Exception as e:
             logger.error(f"Error saving 3D files to {output_path}: {e}")
