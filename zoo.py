@@ -47,7 +47,7 @@ class VGGTModelConfig(fout.TorchImageModelConfig):
         self.model_name = self.parse_string(d, "model_name", default="facebook/VGGT-1B")
         self.model_path = self.parse_string(d, "model_path")
         self.confidence_threshold = self.parse_number(d, "confidence_threshold", default=51.0)
-        self.mode = self.parse_number(d, "mode", default="pad")
+        self.mode = self.parse_string(d, "mode", default="pad")
 
 
 class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
