@@ -289,6 +289,37 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
         except Exception as e:
             logger.error(f"Error saving depth PNG to {output_path}: {e}")
 
+    def _extract_camera_parameters(self, vggt_output):
+        """Extract camera position, rotation, and other parameters from VGGT output."""
+        extrinsic = np.squeeze(vggt_output["extrinsic"])
+        intrinsic = np.squeeze(vggt_output["intrinsic"])
+        
+        # Handle different extrinsic matrix shapes
+        if extrinsic.shape == (3, 4):
+            R = extrinsic[:3, :3]  # Rotation matrix (world-to-camera)
+            t = extrinsic[:, 3]    # Translation vector
+        elif extrinsic.shape == (4, 4):
+            R = extrinsic[:3, :3]
+            t = extrinsic[:3, 3]
+        else:
+            # Fallback - no camera positioning
+            return None
+        
+        # Camera position in world coordinates (for world-to-camera transform)
+        camera_position = -R.T @ t
+        
+        # Camera orientation vectors in world coordinates
+        R_cam_to_world = R.T
+        camera_forward = R_cam_to_world @ np.array([0, 0, 1])  # Camera Z-axis (forward)
+        camera_up = R_cam_to_world @ np.array([0, -1, 0])     # Camera -Y-axis (up in OpenCV)
+        
+        return {
+            "position": camera_position.tolist(),
+            "forward": camera_forward.tolist(),
+            "up": camera_up.tolist(),
+            "rotation_matrix": R_cam_to_world.tolist()
+        }
+
     def _determine_camera_up_direction(self, extrinsic_matrix):
         """Determine the best up direction for FiftyOne's 3D viewer based on camera pose."""
         
@@ -334,20 +365,43 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
         
         return best_axis
 
+    def _determine_scene_camera_setup(self, vggt_output):
+        """Determine both camera position and up direction for the scene."""
+        
+        # Extract camera parameters
+        camera_params = self._extract_camera_parameters(vggt_output)
+        
+        if camera_params is None:
+            # Fallback to just up direction
+            up_direction = self._determine_camera_up_direction(vggt_output["extrinsic"])
+            return {"up": up_direction, "center": None}
+        
+        # Determine up direction
+        up_direction = self._determine_camera_up_direction(vggt_output["extrinsic"])
+        
+        # Camera position for scene viewing
+        camera_position = camera_params["position"]
+        
+        return {
+            "up": up_direction,
+            "center": camera_position,  # Position the scene camera at the VGGT camera location
+            "camera_params": camera_params
+        }
 
     def _save_fo3d(self, vggt_output: Dict, output_path: Path):
-        """Save 3D point cloud in both PCD and FiftyOne's fo3d formats.
+        """Save 3D point cloud with VGGT camera positioning.
         
         Converts VGGT's depth map and camera parameters into a colored 3D point
-        cloud suitable for visualization in FiftyOne's 3D viewer. Points are
-        filtered by confidence to remove noisy regions.
+        cloud suitable for visualization in FiftyOne's 3D viewer. The scene camera
+        is positioned at the actual VGGT camera location for authentic viewpoint.
         
         Processing pipeline:
         1. Unproject depth map to 3D world coordinates using camera parameters
         2. Extract corresponding colors from the input image
         3. Apply confidence-based filtering to remove unreliable points
         4. Create Open3D point cloud with colors
-        5. Save as both PCD and fo3d formats with dynamic camera orientation
+        5. Position FiftyOne scene camera at VGGT camera location
+        6. Save as both PCD and fo3d formats
         
         Args:
             vggt_output (Dict): Complete VGGT inference results including depth,
@@ -389,21 +443,35 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
             o3d.io.write_point_cloud(str(pcd_path), pcd, write_ascii=False)
             logger.debug(f"Saved PCD file with {np.sum(mask):,} points to {pcd_path}")
             
-            # Determine optimal camera up direction from extrinsic matrix
-            up_direction = self._determine_camera_up_direction(vggt_output["extrinsic"])
+            # Get camera setup using VGGT camera information
+            camera_setup = self._determine_scene_camera_setup(vggt_output)
             
             # Convert to FiftyOne's fo3d format for 3D visualization
             scene = fo.Scene()
-            scene.camera = fo.PerspectiveCamera(up=up_direction)  # Dynamic camera orientation
-            mesh = fo.PointCloud("pointcloud", str(pcd_path))     # Reference the saved PCD
+            
+            # Set up camera with VGGT camera position and orientation
+            if camera_setup["center"] is not None:
+                scene.camera = fo.PerspectiveCamera(
+                    center=camera_setup["center"],  # Position camera at VGGT camera location
+                    up=camera_setup["up"]           # Set up direction based on camera pose
+                )
+                logger.debug(f"Positioned camera at {camera_setup['center']} with up={camera_setup['up']}")
+            else:
+                # Fallback to just up direction
+                scene.camera = fo.PerspectiveCamera(up=camera_setup["up"])
+                logger.debug(f"Set camera up direction to {camera_setup['up']}")
+            
+            # Add point cloud to scene
+            mesh = fo.PointCloud("pointcloud", str(pcd_path.name))  # Use relative path
             scene.add(mesh)
             scene.write(str(output_path))
             
-            logger.debug(f"Saved fo3d file with dynamic camera orientation (up={up_direction}) to {output_path}")
+            logger.debug(f"Saved fo3d file with VGGT camera positioning to {output_path}")
             
         except Exception as e:
             logger.error(f"Error saving 3D files to {output_path}: {e}")
-            
+
+
 class VGGTOutputProcessor(fout.OutputProcessor):
     """Output processor for VGGT model predictions.
     
