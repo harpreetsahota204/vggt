@@ -289,6 +289,52 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
         except Exception as e:
             logger.error(f"Error saving depth PNG to {output_path}: {e}")
 
+    def _determine_camera_up_direction(self, extrinsic_matrix):
+        """Determine the best up direction for FiftyOne's 3D viewer based on camera pose."""
+        
+        # Handle different extrinsic matrix shapes
+        extrinsic = np.squeeze(extrinsic_matrix)
+        
+        if extrinsic.shape == (3, 4):
+            R = extrinsic[:3, :3]  # Rotation matrix (world-to-camera)
+        elif extrinsic.shape == (4, 4):
+            R = extrinsic[:3, :3]
+        elif extrinsic.shape == (3, 3):
+            R = extrinsic  # Already just rotation
+        else:
+            # Fallback to default
+            return "Y"
+        
+        # Camera-to-world rotation matrix  
+        R_cam_to_world = R.T
+        
+        # Assume world Y-axis points up (standard gravity direction)
+        world_up = np.array([0, 1, 0])
+        
+        # Find which camera axis best aligns with world up (FiftyOne only supports X, Y, Z)
+        camera_axes = {
+            "X": np.array([1, 0, 0]),
+            "Y": np.array([0, 1, 0]),
+            "Z": np.array([0, 0, 1])
+        }
+        
+        # Transform world up to camera coordinates
+        world_to_cam_R = R_cam_to_world.T
+        world_up_in_cam = world_to_cam_R @ world_up
+        
+        best_alignment = -1
+        best_axis = "Y"  # Default fallback
+        
+        for axis_name, axis_vec in camera_axes.items():
+            # Check both positive and negative alignment, but only return positive axes
+            alignment = abs(np.dot(world_up_in_cam, axis_vec))
+            if alignment > best_alignment:
+                best_alignment = alignment
+                best_axis = axis_name
+        
+        return best_axis
+
+
     def _save_fo3d(self, vggt_output: Dict, output_path: Path):
         """Save 3D point cloud in both PCD and FiftyOne's fo3d formats.
         
@@ -301,7 +347,7 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
         2. Extract corresponding colors from the input image
         3. Apply confidence-based filtering to remove unreliable points
         4. Create Open3D point cloud with colors
-        5. Save as both PCD and fo3d formats
+        5. Save as both PCD and fo3d formats with dynamic camera orientation
         
         Args:
             vggt_output (Dict): Complete VGGT inference results including depth,
@@ -343,19 +389,21 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
             o3d.io.write_point_cloud(str(pcd_path), pcd, write_ascii=False)
             logger.debug(f"Saved PCD file with {np.sum(mask):,} points to {pcd_path}")
             
+            # Determine optimal camera up direction from extrinsic matrix
+            up_direction = self._determine_camera_up_direction(vggt_output["extrinsic"])
+            
             # Convert to FiftyOne's fo3d format for 3D visualization
             scene = fo.Scene()
-            scene.camera = fo.PerspectiveCamera(up="Z")  # Set camera orientation
-            mesh = fo.PointCloud("pointcloud", str(pcd_path))  # Reference the saved PCD
+            scene.camera = fo.PerspectiveCamera(up=up_direction)  # Dynamic camera orientation
+            mesh = fo.PointCloud("pointcloud", str(pcd_path))     # Reference the saved PCD
             scene.add(mesh)
             scene.write(str(output_path))
             
-            logger.debug(f"Saved fo3d file to {output_path}")
+            logger.debug(f"Saved fo3d file with dynamic camera orientation (up={up_direction}) to {output_path}")
             
         except Exception as e:
             logger.error(f"Error saving 3D files to {output_path}: {e}")
-
-
+            
 class VGGTOutputProcessor(fout.OutputProcessor):
     """Output processor for VGGT model predictions.
     
@@ -381,7 +429,7 @@ class VGGTOutputProcessor(fout.OutputProcessor):
     def __init__(self, classes=None, **kwargs):
         super().__init__(classes, **kwargs)
     
-    def __call__(self, predictions, frame_size, confidence_thresh=None):
+    def __call__(self, predictions):
         """Convert VGGT prediction into FiftyOne Heatmap label.
         
         Note: FiftyOne processes one prediction at a time, not batches.
@@ -399,12 +447,7 @@ class VGGTOutputProcessor(fout.OutputProcessor):
             return None
             
         try:
-            # Create FiftyOne Heatmap label pointing to depth PNG
-            heatmap = fol.Heatmap(
-                label="depth_map",                      # Descriptive label for UI
-                map_path=predictions['depth_map_path']  # Path to colorized depth PNG
-            )
-            return heatmap
+            return predictions['depth_map_path']
             
         except Exception as e:
             logger.error(f"Error creating heatmap label: {e}")
