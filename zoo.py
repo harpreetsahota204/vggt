@@ -248,50 +248,21 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
             logger.error(f"Error processing sample {sample.filepath}: {e}")
             return None
 
-    def _preprocess_vggt_image(self, img):
+    def _preprocess_vggt_image(self, sample):
         """Preprocess image using VGGT's built-in preprocessing function."""
-        # Get original size before preprocessing
-        if isinstance(img, torch.Tensor):
-            # Convert tensor back to PIL Image to get size
-            if img.dim() == 3 and img.shape[0] in [1, 3, 4]:  # CHW format
-                img_pil = TF.to_pil_image(img)
-                original_size = img_pil.size  # (width, height)
-                
-                # Save the PIL image to a temporary location for VGGT preprocessing
-                import tempfile
-                with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp_file:
-                    img_pil.save(tmp_file.name)
-                    temp_path = tmp_file.name
-            else:
-                raise ValueError(f"Unexpected tensor shape: {img.shape}. Expected CHW format with 1, 3, or 4 channels.")
-        else:
-            # Already a PIL Image
-            original_size = img.size  # (width, height)
-            
-            # Save to temporary file for VGGT preprocessing
-            import tempfile
-            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp_file:
-                img.save(tmp_file.name)
-                temp_path = tmp_file.name
+        # Use the original file path directly - much more efficient!
+        original_path = sample.filepath
+        original_size = Image.open(original_path).size  # Get original size
         
-        try:
-            # Use VGGT's built-in preprocessing (same as working single image code)
-            images = load_and_preprocess_images([temp_path]).to(self._device)
-            
-            # Remove batch dimension since we're processing single images
-            img_tensor = images.squeeze(0)  # Remove batch dim: [1, C, H, W] -> [C, H, W]
-            
-            vggt_size = (img_tensor.shape[-1], img_tensor.shape[-2])  # (width, height)
-            
-            return img_tensor, original_size
-            
-        finally:
-            # Clean up temporary file
-            import os
-            try:
-                os.unlink(temp_path)
-            except:
-                pass  # Ignore cleanup errors
+        # Use VGGT's built-in preprocessing directly on original file
+        images = load_and_preprocess_images([original_path], mode="pad").to(self._device)
+        
+        # Remove batch dimension since we're processing single images
+        img_tensor = images.squeeze(0)  # [1, C, H, W] -> [C, H, W]
+        
+        vggt_size = (img_tensor.shape[-1], img_tensor.shape[-2])  # (width, height)
+        
+        return img_tensor, original_size
 
     def _generate_query_points(self, height: int, width: int, num_points: int) -> List[Tuple[float, float]]:
         """Generate a grid of query points for 3D tracking in original image coordinates.
