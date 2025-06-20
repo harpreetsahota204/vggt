@@ -160,7 +160,6 @@ class VGGTModel(fout.TorchImageModel, fout.TorchSamplesMixin):
             # Define output paths for all auxiliary files
             depth_png_path = base_dir / f"{base_name}_depth.png"      # Colorized depth for heatmap
             fo3d_path = base_dir / f"{base_name}.fo3d"                # 3D point cloud
-            keypoints_path = base_dir / f"{base_name}_keypoints.json" # Tracking data
             
             # Preprocess image using VGGT-specific requirements
             img_tensor, original_size = self._preprocess_vggt_image(sample)
