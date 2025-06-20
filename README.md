@@ -2,6 +2,8 @@
 
 This repository provides a FiftyOne Zoo Model for **VGGT (Visual Geometry Grounded Transformer)**, enabling seamless 3D scene reconstruction from single images with integrated visualization capabilities.
 
+<img src="vggt-lq.gif">
+
 ## Overview
 
 VGGT takes a single RGB image as input and produces:
@@ -16,8 +18,18 @@ VGGT takes a single RGB image as input and produces:
 # Install FiftyOne
 pip install fiftyone
 
-# Register the VGGT Zoo Model source
-import fiftyone.zoo as foz
+```
+
+You also need to install the following:
+
+```bash
+pip install vggt@git+https://github.com/facebookresearch/vggt.git
+pip install open3d
+```
+
+### Register the VGGT Zoo Model source
+
+```import fiftyone.zoo as foz
 foz.register_zoo_model_source(
     "https://github.com/harpreetsahota204/vggt",
     overwrite=True
